@@ -37,6 +37,19 @@ class RegRef : public Value {
   }
 };
 
+// alloc 指令引用, 用于 load/store 中引用 alloc 分配的变量
+// 例如 @x, @y
+class AllocRef : public Value {
+ public:
+  std::string name;  // 带 @ 前缀, 如 "@x"
+
+  AllocRef(const std::string &n) : name(n) {}
+
+  void Dump() const override {
+    std::cout << name;
+  }
+};
+
 // 二元运算指令
 // 例如 %0 = sub 0, 5
 class BinaryInst : public Value {
@@ -58,13 +71,54 @@ class BinaryInst : public Value {
   }
 };
 
+// alloc 指令: @x = alloc i32
+class AllocInst : public Value {
+ public:
+  std::string name;  // 带 @ 前缀, 如 "@x"
+
+  AllocInst(const std::string &n) : name(n) {}
+
+  void Dump() const override {
+    std::cout << name << " = alloc i32";
+  }
+};
+
+// load 指令: %dest = load @src
+class LoadInst : public Value {
+ public:
+  int dest;
+  std::string src;  // 带 @ 前缀, 如 "@x"
+
+  LoadInst(int d, const std::string &s) : dest(d), src(s) {}
+
+  void Dump() const override {
+    std::cout << "%" << dest << " = load " << src;
+  }
+};
+
+// store 指令: store value, dest
+class StoreInst : public Value {
+ public:
+  std::unique_ptr<Value> value;
+  std::string dest;  // 带 @ 前缀, 如 "@x"
+
+  StoreInst(std::unique_ptr<Value> v, const std::string &d)
+    : value(std::move(v)), dest(d) {}
+
+  void Dump() const override {
+    std::cout << "store ";
+    value->Dump();
+    std::cout << ", " << dest;
+  }
+};
+
 // 返回指令
 class Return : public Value {
  public:
   std::unique_ptr<Value> value;
-  
+
   Return(std::unique_ptr<Value> v) : value(std::move(v)) {}
-  
+
   void Dump() const override {
     std::cout << "ret ";
     value->Dump();
@@ -76,9 +130,9 @@ class BasicBlock {
  public:
   std::string name;
   std::vector<std::unique_ptr<Value>> instructions;
-  
+
   BasicBlock(const std::string &n) : name(n) {}
-  
+
   void Dump() const {
     std::cout << "%" << name << ":" << std::endl;
     for (const auto &inst : instructions) {
@@ -94,9 +148,9 @@ class Function {
  public:
   std::string name;
   std::vector<std::unique_ptr<BasicBlock>> blocks;
-  
+
   Function(const std::string &n) : name(n) {}
-  
+
   void Dump() const {
     std::cout << "fun @" << name << "(): i32 {" << std::endl;
     for (const auto &block : blocks) {
@@ -110,7 +164,7 @@ class Function {
 class Program {
  public:
   std::vector<std::unique_ptr<Function>> functions;
-  
+
   void Dump() const {
     for (const auto &func : functions) {
       func->Dump();

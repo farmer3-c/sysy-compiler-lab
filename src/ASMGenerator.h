@@ -3,6 +3,7 @@
 #include <iostream>
 #include <string>
 #include <map>
+#include <unordered_map>
 #include "koopa.h"
 
 class ASMGenerator {
@@ -18,20 +19,27 @@ private:
     void Visit(const koopa_raw_basic_block_t &bb);
     void Visit(const koopa_raw_value_t &value);
 
+    // 栈帧: 预扫描分配偏移
+    void AssignStackOffsets(const koopa_raw_function_t &func);
+
     // 辅助
     void EmitPrologue();
     void EmitEpilogue();
 
-    // 寄存器分配辅助
+    // 获取操作数: 将 IR 值加载到寄存器
+    std::string GetOperand(koopa_raw_value_t value);
+    // 分配临时寄存器
     std::string AllocReg();
-    std::string LoadValueToReg(koopa_raw_value_t value);
 
     // 共享状态
     std::ostream &os;
     int frame_size = 0;                  // 对齐后的栈帧大小
     std::string cur_func;                // 当前函数名（已去 @）
 
-    // 寄存器追踪: 每个 IR value 分配到的寄存器名
-    std::map<koopa_raw_value_t, std::string> val_to_reg;
-    int next_reg = 0;                    // 下一个可用临时寄存器编号
+    // 值 → 栈偏移映射 (偏移从 sp 起算)
+    std::unordered_map<koopa_raw_value_t, int> stack_offsets;
+    int slot_count = 0;                  // 总栈槽数
+
+    // 临时寄存器池
+    int next_reg = 0;
 };

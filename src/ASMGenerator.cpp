@@ -4,117 +4,79 @@
 
 // 分配一个新的临时寄存器 (t0-t6)
 std::string ASMGenerator::AllocReg() {
-    int idx = (next_reg++)%7;
+    int idx = (next_reg++) % 7;
     return "t" + std::to_string(idx);
 }
 
-// 将 Koopa IR 值加载到寄存器中, 返回寄存器名
-std::string ASMGenerator::LoadValueToReg(koopa_raw_value_t value) {
-    // 如果这个值已经有寄存器映射, 直接返回
-    auto it = val_to_reg.find(value);
-    if (it != val_to_reg.end()) {
-        return it->second;
-    }
+// 判断一个值是否具有返回值 (非 unit 类型)
+static bool HasReturnValue(koopa_raw_value_t value) {
+    if (!value || !value->ty) return false;
+    return value->ty->tag != KOOPA_RTT_UNIT;
+}
 
-    // 根据值的类型处理
-    switch (value->kind.tag) {
-    case KOOPA_RVT_INTEGER: {
+// 将 Koopa IR 值加载到寄存器中, 返回寄存器名
+// 如果值是整数常量: li 加载
+// 否则: 从值的栈槽中 lw 加载
+std::string ASMGenerator::GetOperand(koopa_raw_value_t value) {
+    if (value->kind.tag == KOOPA_RVT_INTEGER) {
+        // 整数常量: 直接 li
         std::string reg = AllocReg();
         os << "  li " << reg << ", " << value->kind.data.integer.value << "\n";
-        val_to_reg[value] = reg;
         return reg;
     }
-    case KOOPA_RVT_BINARY: {
-        // 递归处理: 先生成该二元运算的代码
-        auto &bin = value->kind.data.binary;
-        std::string lhs_reg = LoadValueToReg(bin.lhs);
-        std::string rhs_reg = LoadValueToReg(bin.rhs);
-        std::string dst_reg = AllocReg();
 
-        switch (bin.op) {
-        case KOOPA_RBO_ADD:
-            os << "  add " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            break;
-        case KOOPA_RBO_SUB:
-            os << "  sub " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            break;
-        case KOOPA_RBO_MUL:
-            os << "  mul " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            break;
-        case KOOPA_RBO_DIV:
-            os << "  div " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            break;
-        case KOOPA_RBO_MOD:
-            os << "  rem " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            break;
-        case KOOPA_RBO_EQ: {
-            // eq: sub 然后 set if zero
-            os << "  sub " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            os << "  sltiu " << dst_reg << ", " << dst_reg << ", 1\n";
-            break;
-        }
-        case KOOPA_RBO_NOT_EQ: {
-            // ne: sub 然后 sltu (set if not zero)
-            os << "  sub " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            os << "  sltu " << dst_reg << ", x0, " << dst_reg << "\n";
-            break;
-        }
-        case KOOPA_RBO_LT:
-            // lt: set less than
-            os << "  slt " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            break;
-        case KOOPA_RBO_GT:
-            // gt: swap operands for slt (rs2 < rs1 → rs1 > rs2)
-            os << "  slt " << dst_reg << ", " << rhs_reg << ", " << lhs_reg << "\n";
-            break;
-        case KOOPA_RBO_LE:
-            // le: not (rs2 < rs1), 即 rs1 <= rs2
-            os << "  slt " << dst_reg << ", " << rhs_reg << ", " << lhs_reg << "\n";
-            os << "  xori " << dst_reg << ", " << dst_reg << ", 1\n";
-            break;
-        case KOOPA_RBO_GE:
-            // ge: not (rs1 < rs2), 即 rs1 >= rs2
-            os << "  slt " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            os << "  xori " << dst_reg << ", " << dst_reg << ", 1\n";
-            break;
-        case KOOPA_RBO_XOR:
-            os << "  xor " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            break;
-        case KOOPA_RBO_AND:
-            os << "  and " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            break;
-        case KOOPA_RBO_OR:
-            os << "  or " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            break;
-        default:
-            break;
-        }
+    // 其他: 从栈帧中加载
+    auto it = stack_offsets.find(value);
+    if (it != stack_offsets.end()) {
+        std::string reg = AllocReg();
+        os << "  lw " << reg << ", " << it->second << "(sp)\n";
+        return reg;
+    }
 
-        val_to_reg[value] = dst_reg;
-        return dst_reg;
-    }
-    default:
-        // 不支持的类型, 返回空字符串
-        return "";
-    }
+    // 未找到: 返回空 (理论上不应到达这里)
+    return "";
 }
+
+// ==================== 栈帧预扫描 ====================
+
+void ASMGenerator::AssignStackOffsets(const koopa_raw_function_t &func) {
+    stack_offsets.clear();
+    slot_count = 0;
+    int offset = 0;
+
+    // 遍历所有基本块和指令
+    for (size_t i = 0; i < func->bbs.len; ++i) {
+        auto bb = reinterpret_cast<koopa_raw_basic_block_t>(func->bbs.buffer[i]);
+        for (size_t j = 0; j < bb->insts.len; ++j) {
+            auto inst = reinterpret_cast<koopa_raw_value_t>(bb->insts.buffer[j]);
+            // 为 alloc 和所有有返回值的指令分配栈槽
+            if (inst->kind.tag == KOOPA_RVT_ALLOC || HasReturnValue(inst)) {
+                stack_offsets[inst] = offset;
+                offset += 4;
+                slot_count++;
+            }
+        }
+    }
+
+    // 计算总帧大小: 栈槽 + ra (4 字节), 对齐到 16
+    int total = offset + 4;  // +4 for ra
+    frame_size = (total + 15) & ~15;
+}
+
+// ==================== 序言 / 尾声 ====================
 
 void ASMGenerator::EmitPrologue() {
     os << "  .text\n";
     os << "  .globl " << cur_func << "\n";
     os << cur_func << ":\n";
-    // 栈帧: 保存 ra(4) + s0(4), 对齐到 16 字节
-    frame_size = 16;
     os << "  addi sp, sp, -" << frame_size << "\n";
+    // 保存 ra
     os << "  sw ra, " << (frame_size - 4) << "(sp)\n";
-    os << "  sw s0, " << (frame_size - 8) << "(sp)\n";
-    os << "  addi s0, sp, " << frame_size << "\n";
 }
 
 void ASMGenerator::EmitEpilogue() {
     os << ".L" << cur_func << "_exit:\n";
     os << "  lw ra, " << (frame_size - 4) << "(sp)\n";
-    os << "  lw s0, " << (frame_size - 8) << "(sp)\n";
     os << "  addi sp, sp, " << frame_size << "\n";
     os << "  ret\n";
 }
@@ -158,6 +120,9 @@ void ASMGenerator::Visit(const koopa_raw_function_t &func) {
     if (func->bbs.len == 0)
         return;
 
+    // 栈帧预扫描
+    AssignStackOffsets(func);
+
     // 序言
     EmitPrologue();
 
@@ -189,26 +154,35 @@ void ASMGenerator::Visit(const koopa_raw_basic_block_t &bb) {
 
 void ASMGenerator::Visit(const koopa_raw_value_t &value) {
     switch (value->kind.tag) {
-    case KOOPA_RVT_RETURN: {
-        auto &ret = value->kind.data.ret;
-        if (ret.value) {
-            // 判断返回值类型: 整数常量或指令结果
-            if (ret.value->kind.tag == KOOPA_RVT_INTEGER) {
-                os << "  li a0, " << ret.value->kind.data.integer.value << "\n";
-            } else {
-                // 指令结果 (例如二元运算): 查找对应的寄存器
-                std::string reg = LoadValueToReg(ret.value);
-                os << "  mv a0, " << reg << "\n";
-            }
-        }
-        os << "  j .L" << cur_func << "_exit\n";
+    case KOOPA_RVT_ALLOC:
+        // alloc: 栈空间已在 AssignStackOffsets 中预留, 无需生成代码
+        break;
+
+    case KOOPA_RVT_LOAD: {
+        // %x = load %y: 从 %y (alloc) 的栈槽读取, 存入 %x 的栈槽
+        auto &load = value->kind.data.load;
+        int src_offset = stack_offsets[load.src];
+        int dst_offset = stack_offsets[value];
+        std::string r = AllocReg();
+        os << "  lw " << r << ", " << src_offset << "(sp)\n";
+        os << "  sw " << r << ", " << dst_offset << "(sp)\n";
         break;
     }
+
+    case KOOPA_RVT_STORE: {
+        // store %val, %dest: 将 %val 的值写入 %dest (alloc) 的栈槽
+        auto &store = value->kind.data.store;
+        std::string val_reg = GetOperand(store.value);
+        int dest_offset = stack_offsets[store.dest];
+        os << "  sw " << val_reg << ", " << dest_offset << "(sp)\n";
+        break;
+    }
+
     case KOOPA_RVT_BINARY: {
-        // 二元运算: 生成代码并记录结果寄存器
+        // 二元运算: 加载操作数, 计算结果, 存入当前值的栈槽
         auto &bin = value->kind.data.binary;
-        std::string lhs_reg = LoadValueToReg(bin.lhs);
-        std::string rhs_reg = LoadValueToReg(bin.rhs);
+        std::string lhs_reg = GetOperand(bin.lhs);
+        std::string rhs_reg = GetOperand(bin.rhs);
         std::string dst_reg = AllocReg();
 
         switch (bin.op) {
@@ -251,22 +225,40 @@ void ASMGenerator::Visit(const koopa_raw_value_t &value) {
             os << "  slt " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
             os << "  xori " << dst_reg << ", " << dst_reg << ", 1\n";
             break;
-        case KOOPA_RBO_XOR:
-            os << "  xor " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
-            break;
         case KOOPA_RBO_AND:
             os << "  and " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
             break;
         case KOOPA_RBO_OR:
             os << "  or " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
             break;
+        case KOOPA_RBO_XOR:
+            os << "  xor " << dst_reg << ", " << lhs_reg << ", " << rhs_reg << "\n";
+            break;
         default:
             break;
         }
 
-        val_to_reg[value] = dst_reg;
+        // 将结果存入栈槽
+        int dst_offset = stack_offsets[value];
+        os << "  sw " << dst_reg << ", " << dst_offset << "(sp)\n";
         break;
     }
+
+    case KOOPA_RVT_RETURN: {
+        auto &ret = value->kind.data.ret;
+        if (ret.value) {
+            if (ret.value->kind.tag == KOOPA_RVT_INTEGER) {
+                os << "  li a0, " << ret.value->kind.data.integer.value << "\n";
+            } else {
+                // 从栈帧加载返回值
+                int offset = stack_offsets[ret.value];
+                os << "  lw a0, " << offset << "(sp)\n";
+            }
+        }
+        os << "  j .L" << cur_func << "_exit\n";
+        break;
+    }
+
     default:
         break;
     }

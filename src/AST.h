@@ -47,22 +47,159 @@ class FuncDefAST : public BaseAST {
 
 class FuncTypeAST : public BaseAST {
  public:
-  std::string type;  
+  std::string type;
   void Dump() const override {
     std::cout << "FuncTypeAST { " << type << " }";
   }
 };
 
+// ==================== Lv4 新增: BType ====================
+// BType ::= "int"
+class BTypeAST : public BaseAST {
+ public:
+  std::string type;
+  void Dump() const override {
+    std::cout << "BTypeAST { " << type << " }";
+  }
+};
+
+// ==================== Lv4 新增: LVal ====================
+// LVal ::= IDENT
+class LValAST : public BaseAST {
+ public:
+  std::string ident;
+  void Dump() const override {
+    std::cout << "LValAST { " << ident << " }";
+  }
+};
+
+// ==================== Lv4 新增: ConstInitVal ====================
+// ConstInitVal ::= ConstExp
+class ConstInitValAST : public BaseAST {
+ public:
+  std::unique_ptr<BaseAST> exp;
+  void Dump() const override {
+    std::cout << "ConstInitValAST { ";
+    exp->Dump();
+    std::cout << " }";
+  }
+};
+
+// ==================== Lv4 新增: ConstDef ====================
+// ConstDef ::= IDENT "=" ConstInitVal
+class ConstDefAST : public BaseAST {
+ public:
+  std::string ident;
+  std::unique_ptr<BaseAST> init_val;
+  void Dump() const override {
+    std::cout << "ConstDefAST { " << ident << ", ";
+    init_val->Dump();
+    std::cout << " }";
+  }
+};
+
+// ==================== Lv4 新增: ConstDecl ====================
+// ConstDecl ::= "const" BType ConstDef {"," ConstDef} ";"
+class ConstDeclAST : public BaseAST {
+ public:
+  std::unique_ptr<BaseAST> btype;
+  std::vector<std::unique_ptr<BaseAST>> const_defs;
+  void Dump() const override {
+    std::cout << "ConstDeclAST { ";
+    btype->Dump();
+    for (auto &def : const_defs) {
+      std::cout << ", ";
+      def->Dump();
+    }
+    std::cout << " }";
+  }
+};
+
+// ==================== Lv4 新增: InitVal ====================
+// InitVal ::= Exp
+class InitValAST : public BaseAST {
+ public:
+  std::unique_ptr<BaseAST> exp;
+  void Dump() const override {
+    std::cout << "InitValAST { ";
+    exp->Dump();
+    std::cout << " }";
+  }
+};
+
+// ==================== Lv4 新增: VarDef ====================
+// VarDef ::= IDENT | IDENT "=" InitVal
+class VarDefAST : public BaseAST {
+ public:
+  std::string ident;
+  bool has_init;
+  std::unique_ptr<BaseAST> init_val;
+  void Dump() const override {
+    std::cout << "VarDefAST { " << ident;
+    if (has_init) {
+      std::cout << ", ";
+      init_val->Dump();
+    }
+    std::cout << " }";
+  }
+};
+
+// ==================== Lv4 新增: VarDecl ====================
+// VarDecl ::= BType VarDef {"," VarDef} ";"
+class VarDeclAST : public BaseAST {
+ public:
+  std::unique_ptr<BaseAST> btype;
+  std::vector<std::unique_ptr<BaseAST>> var_defs;
+  void Dump() const override {
+    std::cout << "VarDeclAST { ";
+    btype->Dump();
+    for (auto &def : var_defs) {
+      std::cout << ", ";
+      def->Dump();
+    }
+    std::cout << " }";
+  }
+};
+
+// ==================== Lv4 新增: Decl ====================
+// Decl ::= ConstDecl | VarDecl
+class DeclAST : public BaseAST {
+ public:
+  bool is_const;  // true: ConstDecl; false: VarDecl
+  std::unique_ptr<BaseAST> decl_body;
+  void Dump() const override {
+    std::cout << "DeclAST { ";
+    decl_body->Dump();
+    std::cout << " }";
+  }
+};
+
+// ==================== Lv4 新增: BlockItem ====================
+// BlockItem ::= Decl | Stmt
+class BlockItemAST : public BaseAST {
+ public:
+  bool is_stmt;  // true: Stmt; false: Decl
+  std::unique_ptr<BaseAST> item;
+  void Dump() const override {
+    std::cout << "BlockItemAST { ";
+    item->Dump();
+    std::cout << " }";
+  }
+};
+
+// ==================== 修改: Block ====================
+// Block ::= "{" {BlockItem} "}"
 class BlockAST : public BaseAST {
  public:
-  std::vector<std::unique_ptr<BaseAST>> system_category;
+  std::vector<std::unique_ptr<BaseAST>> items;
 
   void Dump() const override {
     std::cout << "BlockAST { ";
-    for (auto &system_category : system_category) {
-      system_category->Dump();
+    for (auto &item : items) {
+      item->Dump();
+      std::cout << " ";
     }
-    std::cout << " }";
+    std::cout << "}";
   }
 };
 
@@ -223,18 +360,22 @@ class LOrExpAST : public BaseAST {
   }
 };
 
-// PrimaryExp ::= "(" Exp ")" | Number
-// 只设计一种 AST 涵盖右侧两种规则, 用 is_number 区分
+// PrimaryExp ::= "(" Exp ")" | LVal | Number
+// 支持三种情况: Number / (Exp) / LVal
 class PrimaryExpAST : public BaseAST {
  public:
-  bool is_number;                    // true: Number; false: "(" Exp ")"
-  std::unique_ptr<BaseAST> exp;     // 当 is_number == false 时使用
+  bool is_number;                    // true: Number
+  bool is_lval;                      // true: LVal (仅当 is_number == false 时有效)
+  std::unique_ptr<BaseAST> exp;     // 当 is_number == false && is_lval == false 时使用: ( Exp )
   int number;                        // 当 is_number == true 时使用
+  std::string ident;                 // 当 is_lval == true 时使用
 
   void Dump() const override {
     std::cout << "PrimaryExpAST { ";
     if (is_number) {
       std::cout << number;
+    } else if (is_lval) {
+      std::cout << ident;
     } else {
       exp->Dump();
     }
@@ -263,15 +404,25 @@ class UnaryExpAST : public BaseAST {
   }
 };
 
-// Stmt ::= "return" Exp ";"
-// Stmt 现在包含一个 Exp 而非 Number, 支持一元表达式
+// Stmt ::= "return" Exp ";" | LVal "=" Exp ";"
+// 支持 return 语句和赋值语句
 class StmtAST : public BaseAST {
  public:
-  std::unique_ptr<BaseAST> exp;
+  bool is_return;                    // true: return; false: assignment
+  std::unique_ptr<BaseAST> exp;     // 当 is_return == true 时使用: return 表达式
+  std::unique_ptr<BaseAST> lval;    // 当 is_return == false 时使用: 赋值左侧
+  std::unique_ptr<BaseAST> assign_exp; // 当 is_return == false 时使用: 赋值右侧
 
   void Dump() const override {
     std::cout << "StmtAST { ";
-    exp->Dump();
+    if (is_return) {
+      std::cout << "return, ";
+      exp->Dump();
+    } else {
+      lval->Dump();
+      std::cout << " = ";
+      assign_exp->Dump();
+    }
     std::cout << " }";
   }
 };
