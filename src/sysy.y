@@ -266,19 +266,37 @@ LVal
   ;
 
 // ==================== Stmt ====================
-// Stmt ::= "return" Exp ";" | LVal "=" Exp ";"
+// Stmt ::= "return" Exp ";" | LVal "=" Exp ";" | [Exp] ";" | Block
 Stmt
   : RETURN Exp ';' {
     auto ast = new StmtAST();
-    ast->is_return = true;
+    ast->kind = StmtAST::RETURN;
     ast->exp = unique_ptr<BaseAST>($2);
     $$ = ast;
   }
   | LVal '=' Exp ';' {
     auto ast = new StmtAST();
-    ast->is_return = false;
+    ast->kind = StmtAST::ASSIGN;
     ast->lval = unique_ptr<BaseAST>($1);
     ast->assign_exp = unique_ptr<BaseAST>($3);
+    $$ = ast;
+  }
+  | Exp ';' {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::EXP_STMT;
+    ast->exp = unique_ptr<BaseAST>($1);
+    $$ = ast;
+  }
+  | ';' {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::EXP_STMT;
+    ast->exp = nullptr;  // 空语句
+    $$ = ast;
+  }
+  | Block {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::BLOCK;
+    ast->block = unique_ptr<BaseAST>($1);
     $$ = ast;
   }
   ;
