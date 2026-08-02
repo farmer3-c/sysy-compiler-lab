@@ -21,6 +21,11 @@ static Function *current_func = nullptr;
 static BasicBlock *entry_block = nullptr;  // 入口基本块，所有 alloc 必须在此
 static int bb_counter = 0;
 
+// 循环上下文栈: 记录当前外层循环的 break/continue 跳转目标基本块名
+// 栈顶为最近一层循环; 嵌套循环时入栈/出栈, 保证 break/continue 只作用于最近一层
+static vector<string> break_targets;    // break → 循环结尾基本块
+static vector<string> continue_targets; // continue → 循环条件基本块
+
 static void EnterScope() { scope_stack.emplace_back(); }
 static void ExitScope() { if (!scope_stack.empty()) scope_stack.pop_back(); }
 
@@ -526,6 +531,63 @@ static BasicBlock *ProcessStmt(const StmtAST &stmt, BasicBlock *cur, int &reg_co
 
     return end_bb;
   }
+  case StmtAST::WHILE: {
+    // while (cond) body:
+    //   entry:   jump %cond_bb
+    //   %cond_bb: %c = 求值 cond; br %c, %body_bb, %end_bb
+    //   %body_bb: ... body ...; jump %cond_bb
+    //   %end_bb:  (循环出口, break 跳转目标)
+    string cond_name = "while_cond_" + to_string(bb_counter++);
+    string body_name = "while_body_" + to_string(bb_counter++);
+    string end_name  = "while_end_"  + to_string(bb_counter++);
+
+    auto *cond_bb = NewBB(cond_name);
+    auto *body_bb = NewBB(body_name);
+    auto *end_bb  = NewBB(end_name);
+
+    // 当前块跳转到条件块 (当前块不应已终止, 否则该 while 不可达)
+    if (!IsTerminated(*cur))
+      cur->instructions.push_back(make_unique<JumpInst>(cond_name));
+
+    // 条件块: 求值条件 (短路运算可能创建新块, 更新 cond_bb 指向结果块)
+    auto cond = EvaluateExp(*stmt.exp, cond_bb, reg_counter);
+    if (cond) cond_bb->instructions.push_back(make_unique<BranchInst>(std::move(cond), body_name, end_name));
+
+    // 注册循环上下文 (入栈), 处理完循环体后出栈
+    break_targets.push_back(end_name);
+    continue_targets.push_back(cond_name);
+
+    const auto *body_stmt = dynamic_cast<const StmtAST*>(stmt.body.get());
+    if (body_stmt) {
+      auto *body_cont = ProcessStmt(*body_stmt, body_bb, reg_counter);
+      // 循环体末尾跳回条件块; 若体已终止 (return/break), 则无需跳回
+      if (body_cont && !IsTerminated(*body_cont))
+        body_cont->instructions.push_back(make_unique<JumpInst>(cond_name));
+    }
+
+    break_targets.pop_back();
+    continue_targets.pop_back();
+
+    return end_bb;
+  }
+  case StmtAST::BREAK: {
+    if (break_targets.empty()) {
+      cerr << "error: break statement outside of a loop" << endl;
+      return cur;
+    }
+    // break → 跳到最近一层循环的结尾基本块, 并终止当前基本块
+    cur->instructions.push_back(make_unique<JumpInst>(break_targets.back()));
+    return nullptr;
+  }
+  case StmtAST::CONTINUE: {
+    if (continue_targets.empty()) {
+      cerr << "error: continue statement outside of a loop" << endl;
+      return cur;
+    }
+    // continue → 跳到最近一层循环的条件基本块, 并终止当前基本块
+    cur->instructions.push_back(make_unique<JumpInst>(continue_targets.back()));
+    return nullptr;
+  }
   }
   return cur;
 }
@@ -538,6 +600,8 @@ unique_ptr<Program> GenerateIR(const BaseAST &ast) {
   scope_stack.clear();
   alloc_counter = 0;
   bb_counter = 0;
+  break_targets.clear();
+  continue_targets.clear();
 
   const auto *comp_unit = dynamic_cast<const CompUnitAST*>(&ast);
   if (!comp_unit) return program;
@@ -554,11 +618,12 @@ unique_ptr<Program> GenerateIR(const BaseAST &ast) {
   int reg_counter = 0;
   ProcessBlockItems(*func_def->block, entry_bb, reg_counter);
 
-  // 如果最后一个基本块未被终止, 补一条 ret 0
-  if (!func->blocks.empty()) {
-    auto *last_bb = func->blocks.back().get();
-    if (!IsTerminated(*last_bb)) {
-      last_bb->instructions.push_back(make_unique<Return>(make_unique<Integer>(0)));
+  // 所有基本块都必须以终止指令 (jump/br/ret) 结尾, 否则 libkoopa 解析会失败.
+  // 嵌套控制流 (如 if 的 end 块) 可能为空且不是最后一个块, 只检查最后一个块会漏掉.
+  // 统一为所有未终止的块补一条 ret 0 (对应函数自然结束返回 0).
+  for (auto &bb : func->blocks) {
+    if (!IsTerminated(*bb)) {
+      bb->instructions.push_back(make_unique<Return>(make_unique<Integer>(0)));
     }
   }
 

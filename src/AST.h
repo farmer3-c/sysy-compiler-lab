@@ -407,19 +407,23 @@ class UnaryExpAST : public BaseAST {
 // Stmt ::= "return" Exp ";" | LVal "=" Exp ";"
 //         | [Exp] ";" | Block
 //         | "if" "(" Exp ")" Stmt ["else" Stmt]
-// 支持 return、赋值、表达式语句、空语句、嵌套语句块、if/else
+//         | "while" "(" Exp ")" Stmt
+//         | "break" ";" | "continue" ";"
+// 支持 return、赋值、表达式语句、空语句、嵌套语句块、if/else、while、break、continue
 class StmtAST : public BaseAST {
  public:
-  enum Kind { RETURN, ASSIGN, EXP_STMT, BLOCK, IF_ELSE };
+  enum Kind { RETURN, ASSIGN, EXP_STMT, BLOCK, IF_ELSE, WHILE, BREAK, CONTINUE };
   Kind kind;
   std::unique_ptr<BaseAST> exp;       // RETURN: return 表达式
                                       // EXP_STMT: 表达式 (nullptr 表示空语句)
                                       // IF_ELSE: 条件表达式
+                                      // WHILE: 循环条件
   std::unique_ptr<BaseAST> lval;      // ASSIGN: 赋值左侧
   std::unique_ptr<BaseAST> assign_exp; // ASSIGN: 赋值右侧
   std::unique_ptr<BaseAST> block;     // BLOCK: 嵌套语句块
   std::unique_ptr<BaseAST> then_stmt; // IF_ELSE: then 分支
   std::unique_ptr<BaseAST> else_stmt; // IF_ELSE: else 分支 (nullptr 表示无 else)
+  std::unique_ptr<BaseAST> body;      // WHILE: 循环体
 
   void Dump() const override {
     std::cout << "StmtAST { ";
@@ -447,6 +451,15 @@ class StmtAST : public BaseAST {
         std::cout << " else ";
         else_stmt->Dump();
       }
+    } else if (kind == WHILE) {
+      std::cout << "while (";
+      exp->Dump();
+      std::cout << ") ";
+      body->Dump();
+    } else if (kind == BREAK) {
+      std::cout << "break";
+    } else if (kind == CONTINUE) {
+      std::cout << "continue";
     }
     std::cout << " }";
   }

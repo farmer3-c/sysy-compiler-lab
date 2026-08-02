@@ -37,7 +37,7 @@ using namespace std;
 // 注意 IDENT 和 INT_CONST 会返回 token 的值, 分别对应 str_val 和 int_val
 %token INT RETURN
 %token CONST
-%token IF ELSE
+%token IF ELSE WHILE BREAK CONTINUE
 %token LE GE EQ NE LAND LOR
 %token <str_val> IDENT
 %token <int_val> INT_CONST
@@ -286,6 +286,9 @@ Stmt
 //               | [Exp] ";"
 //               | Block
 //               | "if" "(" Exp ")" MatchedStmt "else" MatchedStmt
+//               | "while" "(" Exp ")" MatchedStmt
+//               | "break" ";"
+//               | "continue" ";"
 MatchedStmt
   : RETURN Exp ';' {
     auto ast = new StmtAST();
@@ -326,10 +329,28 @@ MatchedStmt
     ast->else_stmt = unique_ptr<BaseAST>($7);
     $$ = ast;
   }
+  | WHILE '(' Exp ')' MatchedStmt {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::WHILE;
+    ast->exp = unique_ptr<BaseAST>($3);
+    ast->body = unique_ptr<BaseAST>($5);
+    $$ = ast;
+  }
+  | BREAK ';' {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::BREAK;
+    $$ = ast;
+  }
+  | CONTINUE ';' {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::CONTINUE;
+    $$ = ast;
+  }
   ;
 
 // OpenStmt ::= "if" "(" Exp ")" Stmt
 //            | "if" "(" Exp ")" MatchedStmt "else" OpenStmt
+//            | "while" "(" Exp ")" OpenStmt
 OpenStmt
   : IF '(' Exp ')' Stmt {
     auto ast = new StmtAST();
@@ -345,6 +366,13 @@ OpenStmt
     ast->exp = unique_ptr<BaseAST>($3);
     ast->then_stmt = unique_ptr<BaseAST>($5);
     ast->else_stmt = unique_ptr<BaseAST>($7);
+    $$ = ast;
+  }
+  | WHILE '(' Exp ')' OpenStmt {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::WHILE;
+    ast->exp = unique_ptr<BaseAST>($3);
+    ast->body = unique_ptr<BaseAST>($5);
     $$ = ast;
   }
   ;
