@@ -244,13 +244,39 @@ void ASMGenerator::Visit(const koopa_raw_value_t &value) {
         break;
     }
 
+    case KOOPA_RVT_BRANCH: {
+        // br %cond, %true, %false
+        auto &br = value->kind.data.branch;
+        std::string cond_reg = GetOperand(br.cond);
+
+        // 目标基本块名 (去 % 前缀)
+        std::string true_label = br.true_bb->name;
+        if (!true_label.empty() && true_label[0] == '%') true_label = true_label.substr(1);
+
+        std::string false_label = br.false_bb->name;
+        if (!false_label.empty() && false_label[0] == '%') false_label = false_label.substr(1);
+
+        os << "  bnez " << cond_reg << ", ." << true_label << "\n";
+        os << "  j ." << false_label << "\n";
+        break;
+    }
+
+    case KOOPA_RVT_JUMP: {
+        // jump %target
+        auto &jump = value->kind.data.jump;
+        std::string target_label = jump.target->name;
+        if (!target_label.empty() && target_label[0] == '%') target_label = target_label.substr(1);
+
+        os << "  j ." << target_label << "\n";
+        break;
+    }
+
     case KOOPA_RVT_RETURN: {
         auto &ret = value->kind.data.ret;
         if (ret.value) {
             if (ret.value->kind.tag == KOOPA_RVT_INTEGER) {
                 os << "  li a0, " << ret.value->kind.data.integer.value << "\n";
             } else {
-                // 从栈帧加载返回值
                 int offset = stack_offsets[ret.value];
                 os << "  lw a0, " << offset << "(sp)\n";
             }

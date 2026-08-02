@@ -406,16 +406,20 @@ class UnaryExpAST : public BaseAST {
 
 // Stmt ::= "return" Exp ";" | LVal "=" Exp ";"
 //         | [Exp] ";" | Block
-// 支持 return、赋值、表达式语句、空语句、嵌套语句块
+//         | "if" "(" Exp ")" Stmt ["else" Stmt]
+// 支持 return、赋值、表达式语句、空语句、嵌套语句块、if/else
 class StmtAST : public BaseAST {
  public:
-  enum Kind { RETURN, ASSIGN, EXP_STMT, BLOCK };
+  enum Kind { RETURN, ASSIGN, EXP_STMT, BLOCK, IF_ELSE };
   Kind kind;
   std::unique_ptr<BaseAST> exp;       // RETURN: return 表达式
                                       // EXP_STMT: 表达式 (nullptr 表示空语句)
+                                      // IF_ELSE: 条件表达式
   std::unique_ptr<BaseAST> lval;      // ASSIGN: 赋值左侧
   std::unique_ptr<BaseAST> assign_exp; // ASSIGN: 赋值右侧
   std::unique_ptr<BaseAST> block;     // BLOCK: 嵌套语句块
+  std::unique_ptr<BaseAST> then_stmt; // IF_ELSE: then 分支
+  std::unique_ptr<BaseAST> else_stmt; // IF_ELSE: else 分支 (nullptr 表示无 else)
 
   void Dump() const override {
     std::cout << "StmtAST { ";
@@ -434,6 +438,15 @@ class StmtAST : public BaseAST {
       }
     } else if (kind == BLOCK) {
       block->Dump();
+    } else if (kind == IF_ELSE) {
+      std::cout << "if (";
+      exp->Dump();
+      std::cout << ") ";
+      then_stmt->Dump();
+      if (else_stmt) {
+        std::cout << " else ";
+        else_stmt->Dump();
+      }
     }
     std::cout << " }";
   }

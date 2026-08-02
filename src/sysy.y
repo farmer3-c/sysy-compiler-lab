@@ -37,6 +37,7 @@ using namespace std;
 // 注意 IDENT 和 INT_CONST 会返回 token 的值, 分别对应 str_val 和 int_val
 %token INT RETURN
 %token CONST
+%token IF ELSE
 %token LE GE EQ NE LAND LOR
 %token <str_val> IDENT
 %token <int_val> INT_CONST
@@ -45,6 +46,7 @@ using namespace std;
 %type <ast_val> FuncDef FuncType Block Stmt Exp LOrExp LAndExp EqExp RelExp AddExp MulExp UnaryExp PrimaryExp
 %type <ast_val> Decl ConstDecl ConstDef ConstInitVal ConstExp VarDecl VarDef InitVal BlockItem BType LVal
 %type <ast_val> BlockItemList ConstDefList VarDefList
+%type <ast_val> MatchedStmt OpenStmt
 %type <str_val> UnaryOp
 %type <int_val> Number
 
@@ -266,8 +268,25 @@ LVal
   ;
 
 // ==================== Stmt ====================
-// Stmt ::= "return" Exp ";" | LVal "=" Exp ";" | [Exp] ";" | Block
+// Stmt ::= MatchedStmt | OpenStmt
+// 通过拆分解决空悬 else 问题:
+//   MatchedStmt: 所有非 if 语句, 以及 if-then-else (then/else 均为 MatchedStmt)
+//   OpenStmt:   if-then (无 else), 或 if-then-else 中 else 部分为 OpenStmt
 Stmt
+  : MatchedStmt {
+    $$ = $1;
+  }
+  | OpenStmt {
+    $$ = $1;
+  }
+  ;
+
+// MatchedStmt ::= "return" Exp ";"
+//               | LVal "=" Exp ";"
+//               | [Exp] ";"
+//               | Block
+//               | "if" "(" Exp ")" MatchedStmt "else" MatchedStmt
+MatchedStmt
   : RETURN Exp ';' {
     auto ast = new StmtAST();
     ast->kind = StmtAST::RETURN;
@@ -290,13 +309,42 @@ Stmt
   | ';' {
     auto ast = new StmtAST();
     ast->kind = StmtAST::EXP_STMT;
-    ast->exp = nullptr;  // 空语句
+    ast->exp = nullptr;
     $$ = ast;
   }
   | Block {
     auto ast = new StmtAST();
     ast->kind = StmtAST::BLOCK;
     ast->block = unique_ptr<BaseAST>($1);
+    $$ = ast;
+  }
+  | IF '(' Exp ')' MatchedStmt ELSE MatchedStmt {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::IF_ELSE;
+    ast->exp = unique_ptr<BaseAST>($3);
+    ast->then_stmt = unique_ptr<BaseAST>($5);
+    ast->else_stmt = unique_ptr<BaseAST>($7);
+    $$ = ast;
+  }
+  ;
+
+// OpenStmt ::= "if" "(" Exp ")" Stmt
+//            | "if" "(" Exp ")" MatchedStmt "else" OpenStmt
+OpenStmt
+  : IF '(' Exp ')' Stmt {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::IF_ELSE;
+    ast->exp = unique_ptr<BaseAST>($3);
+    ast->then_stmt = unique_ptr<BaseAST>($5);
+    ast->else_stmt = nullptr;
+    $$ = ast;
+  }
+  | IF '(' Exp ')' MatchedStmt ELSE OpenStmt {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::IF_ELSE;
+    ast->exp = unique_ptr<BaseAST>($3);
+    ast->then_stmt = unique_ptr<BaseAST>($5);
+    ast->else_stmt = unique_ptr<BaseAST>($7);
     $$ = ast;
   }
   ;

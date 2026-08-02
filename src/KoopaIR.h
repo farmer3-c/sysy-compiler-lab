@@ -112,6 +112,35 @@ class StoreInst : public Value {
   }
 };
 
+// 条件分支: br cond, %true_bb, %false_bb
+class BranchInst : public Value {
+ public:
+  std::unique_ptr<Value> cond;
+  std::string true_bb;
+  std::string false_bb;
+
+  BranchInst(std::unique_ptr<Value> c, const std::string &t, const std::string &f)
+    : cond(std::move(c)), true_bb(t), false_bb(f) {}
+
+  void Dump() const override {
+    std::cout << "br ";
+    cond->Dump();
+    std::cout << ", %" << true_bb << ", %" << false_bb;
+  }
+};
+
+// 无条件跳转: jump %target
+class JumpInst : public Value {
+ public:
+  std::string target;
+
+  JumpInst(const std::string &t) : target(t) {}
+
+  void Dump() const override {
+    std::cout << "jump %" << target;
+  }
+};
+
 // 返回指令
 class Return : public Value {
  public:
