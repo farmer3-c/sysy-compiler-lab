@@ -4,6 +4,7 @@
 #include <string>
 #include <map>
 #include <unordered_map>
+#include <set>
 #include "koopa.h"
 
 class ASMGenerator {
@@ -35,6 +36,7 @@ private:
     std::ostream &os;
     int frame_size = 0;                  // 对齐后的栈帧大小
     std::string cur_func;                // 当前函数名（已去 @）
+    bool is_leaf = true;                 // 叶子函数 (不含 call 指令)
 
     // 值 → 栈偏移映射 (偏移从 sp 起算)
     std::unordered_map<koopa_raw_value_t, int> stack_offsets;

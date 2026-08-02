@@ -24,6 +24,14 @@ class Integer : public Value {
   }
 };
 
+// 零初始化器 (用于全局变量 zeroinit)
+class ZeroInit : public Value {
+ public:
+  void Dump() const override {
+    std::cout << "zeroinit";
+  }
+};
+
 // 寄存器引用, 用于引用前面的指令结果
 // 例如 %0, %1, ...
 class RegRef : public Value {
@@ -38,6 +46,7 @@ class RegRef : public Value {
 };
 
 // alloc 指令引用, 用于 load/store 中引用 alloc 分配的变量
+// 也用于引用函数参数
 // 例如 @x, @y
 class AllocRef : public Value {
  public:
@@ -144,13 +153,56 @@ class JumpInst : public Value {
 // 返回指令
 class Return : public Value {
  public:
-  std::unique_ptr<Value> value;
+  std::unique_ptr<Value> value;  // nullptr 表示 void 返回
 
   Return(std::unique_ptr<Value> v) : value(std::move(v)) {}
 
   void Dump() const override {
-    std::cout << "ret ";
-    value->Dump();
+    std::cout << "ret";
+    if (value) {
+      std::cout << " ";
+      value->Dump();
+    }
+  }
+};
+
+// ==================== Lv8 新增: 全局内存分配 ====================
+// global @var = alloc i32, zeroinit
+// global @var = alloc i32, 42
+class GlobalAllocInst : public Value {
+ public:
+  std::string name;  // 带 @ 前缀, 如 "@var"
+  std::unique_ptr<Value> init_val;
+
+  GlobalAllocInst(const std::string &n, std::unique_ptr<Value> init)
+    : name(n), init_val(std::move(init)) {}
+
+  void Dump() const override {
+    std::cout << "global " << name << " = alloc i32, ";
+    init_val->Dump();
+  }
+};
+
+// ==================== Lv8 新增: 函数调用 ====================
+// %dest = call @func(args)   — 有返回值
+// call @func(args)           — void 调用
+class CallInst : public Value {
+ public:
+  int dest;  // -1 表示 void 调用 (无返回值)
+  std::string func_name;  // 带 @ 前缀, 如 "@add"
+  std::vector<std::unique_ptr<Value>> args;
+
+  CallInst(int d, const std::string &f, std::vector<std::unique_ptr<Value>> a)
+    : dest(d), func_name(f), args(std::move(a)) {}
+
+  void Dump() const override {
+    if (dest >= 0) std::cout << "%" << dest << " = ";
+    std::cout << "call " << func_name << "(";
+    for (size_t i = 0; i < args.size(); ++i) {
+      if (i > 0) std::cout << ", ";
+      args[i]->Dump();
+    }
+    std::cout << ")";
   }
 };
 
@@ -172,31 +224,65 @@ class BasicBlock {
   }
 };
 
-// 函数
+// 函数参数
+struct FuncParam {
+  std::string name;  // 带 @ 前缀, 如 "@x"
+  std::string type;  // "i32"
+};
+
+// 函数 (定义或声明)
 class Function {
  public:
-  std::string name;
+  std::string name;                   // 带 @ 前缀, 如 "@main"
+  bool is_decl;                       // true: decl 声明; false: fun 定义
+  std::vector<FuncParam> params;      // 形式参数列表
+  std::string ret_type;              // "i32" 或 "" (void)
   std::vector<std::unique_ptr<BasicBlock>> blocks;
 
-  Function(const std::string &n) : name(n) {}
+  Function(const std::string &n) : name(n), is_decl(false) {}
 
   void Dump() const {
-    std::cout << "fun @" << name << "(): i32 {" << std::endl;
-    for (const auto &block : blocks) {
-      block->Dump();
+    if (is_decl) {
+      // decl @getint(): i32
+      std::cout << "decl " << name << "(";
+      for (size_t i = 0; i < params.size(); ++i) {
+        if (i > 0) std::cout << ", ";
+        std::cout << params[i].type;
+      }
+      std::cout << ")";
+      if (!ret_type.empty()) std::cout << ": " << ret_type;
+      std::cout << std::endl;
+    } else {
+      // fun @main(@x: i32): i32 {
+      std::cout << "fun " << name << "(";
+      for (size_t i = 0; i < params.size(); ++i) {
+        if (i > 0) std::cout << ", ";
+        std::cout << params[i].name << ": " << params[i].type;
+      }
+      std::cout << ")";
+      if (!ret_type.empty()) std::cout << ": " << ret_type;
+      std::cout << " {" << std::endl;
+      for (const auto &block : blocks) {
+        block->Dump();
+      }
+      std::cout << "}" << std::endl;
     }
-    std::cout << "}" << std::endl;
   }
 };
 
 // 程序
 class Program {
  public:
+  // 全局变量分配 (global alloc)
+  std::vector<std::unique_ptr<Value>> global_allocs;
+  // 函数声明 (decl)
+  std::vector<std::unique_ptr<Function>> declarations;
+  // 函数定义 (fun)
   std::vector<std::unique_ptr<Function>> functions;
 
   void Dump() const {
-    for (const auto &func : functions) {
-      func->Dump();
-    }
+    for (const auto &decl : declarations) decl->Dump();
+    for (const auto &ga : global_allocs) { ga->Dump(); std::cout << std::endl; }
+    for (const auto &func : functions) func->Dump();
   }
 };

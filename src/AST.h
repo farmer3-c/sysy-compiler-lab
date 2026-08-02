@@ -13,47 +13,78 @@ class BaseAST {
   virtual void Dump() const = 0;
 };
 
-// CompUnit 是 BaseAST
+// ==================== CompUnit ====================
+// CompUnit ::= [CompUnit] (Decl | FuncDef)
+// 用 items 列表存储顶层声明/函数定义
+
+// 前置声明
+class CompUnitItemAST;
+
 class CompUnitAST : public BaseAST {
  public:
-  // 用智能指针管理对象
-  std::unique_ptr<BaseAST> func_def;
+  // 每个元素要么是 Decl (全局变量/常量), 要么是 FuncDef
+  std::vector<std::unique_ptr<BaseAST>> items;
 
-    void Dump() const override {
+  void Dump() const override {
     std::cout << "CompUnitAST { ";
-    func_def->Dump();
-    std::cout << " }";
+    for (auto &item : items) {
+      item->Dump();
+      std::cout << " ";
+    }
+    std::cout << "}";
   }
 };
 
-// FuncDef 也是 BaseAST
+// ==================== FuncFParam ====================
+// FuncFParam ::= BType IDENT
+class FuncFParamAST : public BaseAST {
+ public:
+  std::unique_ptr<BaseAST> btype;
+  std::string ident;
+
+  void Dump() const override {
+    std::cout << "FuncFParamAST { ";
+    btype->Dump();
+    std::cout << ", " << ident << " }";
+  }
+};
+
+// ==================== FuncDef (Lv8: 增加参数) ====================
+// FuncDef ::= FuncType IDENT "(" [FuncFParams] ")" Block;
 class FuncDefAST : public BaseAST {
  public:
   std::unique_ptr<BaseAST> func_type;
   std::string ident;
+  bool has_params;  // true 表示有参数列表
+  std::vector<std::unique_ptr<BaseAST>> params;  // FuncFParamAST 列表
   std::unique_ptr<BaseAST> block;
 
   void Dump() const override {
     std::cout << "FuncDefAST { ";
     func_type->Dump();
-    std::cout << ", " << ident << ", ";
+    std::cout << ", " << ident;
+    if (has_params) {
+      for (auto &p : params) {
+        std::cout << ", ";
+        p->Dump();
+      }
+    }
+    std::cout << ", ";
     block->Dump();
     std::cout << " }";
   }
 };
 
-// 其他 AST 类的定义, 例如 FuncTypeAST, BlockAST, StmtAST 等等
-// 以及新增的 ExpAST, PrimaryExpAST, UnaryExpAST 等
-
+// FuncType ::= "void" | "int"
 class FuncTypeAST : public BaseAST {
  public:
-  std::string type;
+  std::string type;  // "void" 或 "int"
   void Dump() const override {
     std::cout << "FuncTypeAST { " << type << " }";
   }
 };
 
-// ==================== Lv4 新增: BType ====================
+// ==================== BType ====================
 // BType ::= "int"
 class BTypeAST : public BaseAST {
  public:
@@ -63,7 +94,7 @@ class BTypeAST : public BaseAST {
   }
 };
 
-// ==================== Lv4 新增: LVal ====================
+// ==================== LVal ====================
 // LVal ::= IDENT
 class LValAST : public BaseAST {
  public:
@@ -73,7 +104,7 @@ class LValAST : public BaseAST {
   }
 };
 
-// ==================== Lv4 新增: ConstInitVal ====================
+// ==================== ConstInitVal ====================
 // ConstInitVal ::= ConstExp
 class ConstInitValAST : public BaseAST {
  public:
@@ -85,7 +116,7 @@ class ConstInitValAST : public BaseAST {
   }
 };
 
-// ==================== Lv4 新增: ConstDef ====================
+// ==================== ConstDef ====================
 // ConstDef ::= IDENT "=" ConstInitVal
 class ConstDefAST : public BaseAST {
  public:
@@ -98,7 +129,7 @@ class ConstDefAST : public BaseAST {
   }
 };
 
-// ==================== Lv4 新增: ConstDecl ====================
+// ==================== ConstDecl ====================
 // ConstDecl ::= "const" BType ConstDef {"," ConstDef} ";"
 class ConstDeclAST : public BaseAST {
  public:
@@ -115,7 +146,7 @@ class ConstDeclAST : public BaseAST {
   }
 };
 
-// ==================== Lv4 新增: InitVal ====================
+// ==================== InitVal ====================
 // InitVal ::= Exp
 class InitValAST : public BaseAST {
  public:
@@ -127,7 +158,7 @@ class InitValAST : public BaseAST {
   }
 };
 
-// ==================== Lv4 新增: VarDef ====================
+// ==================== VarDef ====================
 // VarDef ::= IDENT | IDENT "=" InitVal
 class VarDefAST : public BaseAST {
  public:
@@ -144,7 +175,7 @@ class VarDefAST : public BaseAST {
   }
 };
 
-// ==================== Lv4 新增: VarDecl ====================
+// ==================== VarDecl ====================
 // VarDecl ::= BType VarDef {"," VarDef} ";"
 class VarDeclAST : public BaseAST {
  public:
@@ -161,7 +192,7 @@ class VarDeclAST : public BaseAST {
   }
 };
 
-// ==================== Lv4 新增: Decl ====================
+// ==================== Decl ====================
 // Decl ::= ConstDecl | VarDecl
 class DeclAST : public BaseAST {
  public:
@@ -174,7 +205,7 @@ class DeclAST : public BaseAST {
   }
 };
 
-// ==================== Lv4 新增: BlockItem ====================
+// ==================== BlockItem ====================
 // BlockItem ::= Decl | Stmt
 class BlockItemAST : public BaseAST {
  public:
@@ -187,7 +218,7 @@ class BlockItemAST : public BaseAST {
   }
 };
 
-// ==================== 修改: Block ====================
+// ==================== Block ====================
 // Block ::= "{" {BlockItem} "}"
 class BlockAST : public BaseAST {
  public:
@@ -204,7 +235,6 @@ class BlockAST : public BaseAST {
 };
 
 // Exp ::= LOrExp
-// 表达式现在从 LOrExp 开始, 涵盖所有二元运算和逻辑运算
 class ExpAST : public BaseAST {
  public:
   std::unique_ptr<BaseAST> lor_exp;
@@ -216,15 +246,30 @@ class ExpAST : public BaseAST {
   }
 };
 
+// ==================== FuncRParams ====================
+// FuncRParams ::= Exp {"," Exp}
+class FuncRParamsAST : public BaseAST {
+ public:
+  std::vector<std::unique_ptr<BaseAST>> exps;
+
+  void Dump() const override {
+    std::cout << "FuncRParamsAST { ";
+    for (size_t i = 0; i < exps.size(); ++i) {
+      if (i > 0) std::cout << ", ";
+      exps[i]->Dump();
+    }
+    std::cout << " }";
+  }
+};
+
 // AddExp ::= MulExp | AddExp ("+" | "-") MulExp
-// 只设计一种 AST 涵盖右侧三种规则, 用 is_mul 区分
 class AddExpAST : public BaseAST {
  public:
-  bool is_mul;                        // true: MulExp; false: AddExp ("+"|"-") MulExp
-  std::unique_ptr<BaseAST> mul_exp;  // 当 is_mul == true 时使用
-  std::unique_ptr<BaseAST> lhs;      // 当 is_mul == false 时使用 (左 AddExp)
-  std::string op;                     // 当 is_mul == false 时使用: "+" / "-"
-  std::unique_ptr<BaseAST> rhs;      // 当 is_mul == false 时使用 (右 MulExp)
+  bool is_mul;
+  std::unique_ptr<BaseAST> mul_exp;
+  std::unique_ptr<BaseAST> lhs;
+  std::string op;
+  std::unique_ptr<BaseAST> rhs;
 
   void Dump() const override {
     std::cout << "AddExpAST { ";
@@ -241,14 +286,13 @@ class AddExpAST : public BaseAST {
 };
 
 // MulExp ::= UnaryExp | MulExp ("*" | "/" | "%") UnaryExp
-// 只设计一种 AST 涵盖右侧四种规则, 用 is_unary 区分
 class MulExpAST : public BaseAST {
  public:
-  bool is_unary;                         // true: UnaryExp; false: MulExp ("*"|"/"|"%") UnaryExp
-  std::unique_ptr<BaseAST> unary_exp;   // 当 is_unary == true 时使用
-  std::unique_ptr<BaseAST> lhs;         // 当 is_unary == false 时使用 (左 MulExp)
-  std::string op;                        // 当 is_unary == false 时使用: "*" / "/" / "%"
-  std::unique_ptr<BaseAST> rhs;         // 当 is_unary == false 时使用 (右 UnaryExp)
+  bool is_unary;
+  std::unique_ptr<BaseAST> unary_exp;
+  std::unique_ptr<BaseAST> lhs;
+  std::string op;
+  std::unique_ptr<BaseAST> rhs;
 
   void Dump() const override {
     std::cout << "MulExpAST { ";
@@ -265,14 +309,13 @@ class MulExpAST : public BaseAST {
 };
 
 // RelExp ::= AddExp | RelExp ("<" | ">" | "<=" | ">=") AddExp
-// 只设计一种 AST 涵盖右侧五种规则, 用 is_add 区分
 class RelExpAST : public BaseAST {
  public:
-  bool is_add;                        // true: AddExp; false: RelExp op AddExp
-  std::unique_ptr<BaseAST> add_exp;  // 当 is_add == true 时使用
-  std::unique_ptr<BaseAST> lhs;      // 当 is_add == false 时使用 (左 RelExp)
-  std::string op;                     // 当 is_add == false 时使用: "<" / ">" / "<=" / ">="
-  std::unique_ptr<BaseAST> rhs;      // 当 is_add == false 时使用 (右 AddExp)
+  bool is_add;
+  std::unique_ptr<BaseAST> add_exp;
+  std::unique_ptr<BaseAST> lhs;
+  std::string op;
+  std::unique_ptr<BaseAST> rhs;
 
   void Dump() const override {
     std::cout << "RelExpAST { ";
@@ -289,14 +332,13 @@ class RelExpAST : public BaseAST {
 };
 
 // EqExp ::= RelExp | EqExp ("==" | "!=") RelExp
-// 只设计一种 AST 涵盖右侧三种规则, 用 is_rel 区分
 class EqExpAST : public BaseAST {
  public:
-  bool is_rel;                        // true: RelExp; false: EqExp ("=="|"!=") RelExp
-  std::unique_ptr<BaseAST> rel_exp;  // 当 is_rel == true 时使用
-  std::unique_ptr<BaseAST> lhs;      // 当 is_rel == false 时使用 (左 EqExp)
-  std::string op;                     // 当 is_rel == false 时使用: "==" / "!="
-  std::unique_ptr<BaseAST> rhs;      // 当 is_rel == false 时使用 (右 RelExp)
+  bool is_rel;
+  std::unique_ptr<BaseAST> rel_exp;
+  std::unique_ptr<BaseAST> lhs;
+  std::string op;
+  std::unique_ptr<BaseAST> rhs;
 
   void Dump() const override {
     std::cout << "EqExpAST { ";
@@ -313,14 +355,13 @@ class EqExpAST : public BaseAST {
 };
 
 // LAndExp ::= EqExp | LAndExp "&&" EqExp
-// 只设计一种 AST 涵盖右侧两种规则, 用 is_eq 区分
 class LAndExpAST : public BaseAST {
  public:
-  bool is_eq;                         // true: EqExp; false: LAndExp "&&" EqExp
-  std::unique_ptr<BaseAST> eq_exp;   // 当 is_eq == true 时使用
-  std::unique_ptr<BaseAST> lhs;      // 当 is_eq == false 时使用 (左 LAndExp)
-  std::string op;                     // 当 is_eq == false 时使用: "&&"
-  std::unique_ptr<BaseAST> rhs;      // 当 is_eq == false 时使用 (右 EqExp)
+  bool is_eq;
+  std::unique_ptr<BaseAST> eq_exp;
+  std::unique_ptr<BaseAST> lhs;
+  std::string op;
+  std::unique_ptr<BaseAST> rhs;
 
   void Dump() const override {
     std::cout << "LAndExpAST { ";
@@ -337,14 +378,13 @@ class LAndExpAST : public BaseAST {
 };
 
 // LOrExp ::= LAndExp | LOrExp "||" LAndExp
-// 只设计一种 AST 涵盖右侧两种规则, 用 is_land 区分
 class LOrExpAST : public BaseAST {
  public:
-  bool is_land;                         // true: LAndExp; false: LOrExp "||" LAndExp
-  std::unique_ptr<BaseAST> land_exp;   // 当 is_land == true 时使用
-  std::unique_ptr<BaseAST> lhs;        // 当 is_land == false 时使用 (左 LOrExp)
-  std::string op;                       // 当 is_land == false 时使用: "||"
-  std::unique_ptr<BaseAST> rhs;        // 当 is_land == false 时使用 (右 LAndExp)
+  bool is_land;
+  std::unique_ptr<BaseAST> land_exp;
+  std::unique_ptr<BaseAST> lhs;
+  std::string op;
+  std::unique_ptr<BaseAST> rhs;
 
   void Dump() const override {
     std::cout << "LOrExpAST { ";
@@ -361,14 +401,13 @@ class LOrExpAST : public BaseAST {
 };
 
 // PrimaryExp ::= "(" Exp ")" | LVal | Number
-// 支持三种情况: Number / (Exp) / LVal
 class PrimaryExpAST : public BaseAST {
  public:
-  bool is_number;                    // true: Number
-  bool is_lval;                      // true: LVal (仅当 is_number == false 时有效)
-  std::unique_ptr<BaseAST> exp;     // 当 is_number == false && is_lval == false 时使用: ( Exp )
-  int number;                        // 当 is_number == true 时使用
-  std::string ident;                 // 当 is_lval == true 时使用
+  bool is_number;
+  bool is_lval;
+  std::unique_ptr<BaseAST> exp;
+  int number;
+  std::string ident;
 
   void Dump() const override {
     std::cout << "PrimaryExpAST { ";
@@ -383,19 +422,37 @@ class PrimaryExpAST : public BaseAST {
   }
 };
 
-// UnaryExp ::= PrimaryExp | UnaryOp UnaryExp
-// 只设计一种 AST 涵盖右侧两种规则, 用 is_primary 区分
+// UnaryExp ::= PrimaryExp
+//            | IDENT "(" [FuncRParams] ")"   // 函数调用
+//            | UnaryOp UnaryExp
 class UnaryExpAST : public BaseAST {
  public:
-  bool is_primary;                    // true: PrimaryExp; false: UnaryOp UnaryExp
-  std::unique_ptr<BaseAST> primary_exp;  // 当 is_primary == true 时使用
-  std::string op;                        // 当 is_primary == false 时使用: "+" / "-" / "!"
-  std::unique_ptr<BaseAST> unary_exp;    // 当 is_primary == false 时使用
+  enum Kind { PRIMARY, CALL, UNARY_OP };
+  Kind kind;
+
+  // PRIMARY
+  std::unique_ptr<BaseAST> primary_exp;
+
+  // CALL
+  std::string func_name;       // 被调用函数名
+  bool has_args;               // 是否有实参
+  std::vector<std::unique_ptr<BaseAST>> args;  // 实参列表 (ExpAST)
+
+  // UNARY_OP
+  std::string op;
+  std::unique_ptr<BaseAST> unary_exp;
 
   void Dump() const override {
     std::cout << "UnaryExpAST { ";
-    if (is_primary) {
+    if (kind == PRIMARY) {
       primary_exp->Dump();
+    } else if (kind == CALL) {
+      std::cout << "call " << func_name << "(";
+      for (size_t i = 0; i < args.size(); ++i) {
+        if (i > 0) std::cout << ", ";
+        args[i]->Dump();
+      }
+      std::cout << ")";
     } else {
       std::cout << op << ", ";
       unary_exp->Dump();
@@ -404,32 +461,38 @@ class UnaryExpAST : public BaseAST {
   }
 };
 
-// Stmt ::= "return" Exp ";" | LVal "=" Exp ";"
-//         | [Exp] ";" | Block
+// Stmt ::= "return" [Exp] ";"
+//         | LVal "=" Exp ";"
+//         | [Exp] ";"
+//         | Block
 //         | "if" "(" Exp ")" Stmt ["else" Stmt]
 //         | "while" "(" Exp ")" Stmt
-//         | "break" ";" | "continue" ";"
-// 支持 return、赋值、表达式语句、空语句、嵌套语句块、if/else、while、break、continue
+//         | "break" ";"
+//         | "continue" ";"
 class StmtAST : public BaseAST {
  public:
   enum Kind { RETURN, ASSIGN, EXP_STMT, BLOCK, IF_ELSE, WHILE, BREAK, CONTINUE };
   Kind kind;
-  std::unique_ptr<BaseAST> exp;       // RETURN: return 表达式
-                                      // EXP_STMT: 表达式 (nullptr 表示空语句)
-                                      // IF_ELSE: 条件表达式
-                                      // WHILE: 循环条件
-  std::unique_ptr<BaseAST> lval;      // ASSIGN: 赋值左侧
+  std::unique_ptr<BaseAST> exp;        // RETURN: return 表达式 (nullptr = void return)
+                                       // EXP_STMT: 表达式 (nullptr 表示空语句)
+                                       // IF_ELSE: 条件表达式
+                                       // WHILE: 循环条件
+  bool has_ret_val;                    // RETURN: true 表示有返回值
+  std::unique_ptr<BaseAST> lval;       // ASSIGN: 赋值左侧
   std::unique_ptr<BaseAST> assign_exp; // ASSIGN: 赋值右侧
-  std::unique_ptr<BaseAST> block;     // BLOCK: 嵌套语句块
-  std::unique_ptr<BaseAST> then_stmt; // IF_ELSE: then 分支
-  std::unique_ptr<BaseAST> else_stmt; // IF_ELSE: else 分支 (nullptr 表示无 else)
-  std::unique_ptr<BaseAST> body;      // WHILE: 循环体
+  std::unique_ptr<BaseAST> block;      // BLOCK: 嵌套语句块
+  std::unique_ptr<BaseAST> then_stmt;  // IF_ELSE: then 分支
+  std::unique_ptr<BaseAST> else_stmt;  // IF_ELSE: else 分支 (nullptr 表示无 else)
+  std::unique_ptr<BaseAST> body;       // WHILE: 循环体
 
   void Dump() const override {
     std::cout << "StmtAST { ";
     if (kind == RETURN) {
-      std::cout << "return, ";
-      exp->Dump();
+      std::cout << "return";
+      if (has_ret_val) {
+        std::cout << ", ";
+        exp->Dump();
+      }
     } else if (kind == ASSIGN) {
       lval->Dump();
       std::cout << " = ";

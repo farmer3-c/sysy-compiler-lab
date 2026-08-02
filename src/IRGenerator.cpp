@@ -5,26 +5,32 @@
 
 using namespace std;
 
-// ==================== 作用域符号表 ====================
+// ==================== 符号表 ====================
 
 struct SymbolInfo {
   bool is_const;
   int const_val;
-  string alloc_name;
+  string alloc_name;       // 局部变量: "@name_N"; 全局变量: "@name"
+  bool is_func;            // true: 函数符号
+  string func_ret_type;   // "i32" 或 "void"
+  int func_param_count;   // 形参个数
+  bool is_global;         // true: 全局变量 (alloc 在 Program 级别)
 };
 
 static vector<unordered_map<string, SymbolInfo>> scope_stack;
-static int alloc_counter = 0;
 
-// 当前正在构建的函数 (用于在表达式求值过程中创建新基本块)
+// 当前正在构建的 Program、Function 等上下文
+static Program *current_program = nullptr;
 static Function *current_func = nullptr;
-static BasicBlock *entry_block = nullptr;  // 入口基本块，所有 alloc 必须在此
+static BasicBlock *entry_block = nullptr;  // 入口基本块, alloc 指令必须在此
+static int alloc_counter = 0;
 static int bb_counter = 0;
 
-// 循环上下文栈: 记录当前外层循环的 break/continue 跳转目标基本块名
-// 栈顶为最近一层循环; 嵌套循环时入栈/出栈, 保证 break/continue 只作用于最近一层
-static vector<string> break_targets;    // break → 循环结尾基本块
-static vector<string> continue_targets; // continue → 循环条件基本块
+// 循环上下文栈
+static vector<string> break_targets;
+static vector<string> continue_targets;
+
+// ==================== 作用域管理 ====================
 
 static void EnterScope() { scope_stack.emplace_back(); }
 static void ExitScope() { if (!scope_stack.empty()) scope_stack.pop_back(); }
@@ -33,26 +39,48 @@ static void AddConst(const string &name, int val) {
   if (scope_stack.empty()) EnterScope();
   auto &cur = scope_stack.back();
   if (cur.count(name)) { cerr << "error: duplicate symbol " << name << endl; return; }
-  cur[name] = {true, val, ""};
+  cur[name] = {true, val, "", false, "", 0, false};
 }
 
-// 前向声明 (定义在下方, 但 AddVar 中就需要用到)
 static bool IsTerminated(const BasicBlock &bb);
 
+// 添加变量: 局部变量在 entry_block 中生成 alloc 指令
+// 全局变量在 Program 中生成 global alloc
 static void AddVar(const string &name, BasicBlock * /*block*/, int &reg_counter) {
   if (scope_stack.empty()) EnterScope();
   auto &cur = scope_stack.back();
   if (cur.count(name)) { cerr << "error: duplicate symbol " << name << endl; return; }
-  string alloc_name = "@" + name + "_" + std::to_string(alloc_counter++);
-  cur[name] = {false, 0, alloc_name};
-  // alloc 必须放在 entry 基本块中, 否则 libkoopa 可能无法解析
-  auto &insts = entry_block->instructions;
-  // 如果 entry 块已被终止, 插入到终止指令之前; 否则追加到末尾
-  if (!insts.empty() && IsTerminated(*entry_block)) {
-    insts.insert(insts.end() - 1, make_unique<AllocInst>(alloc_name));
+
+  // 判断是否在全局作用域 (仅全局作用域一层, 即 scope_stack.size() == 1)
+  bool is_global = (scope_stack.size() == 1 &&
+                    current_func == nullptr);
+
+  if (is_global) {
+    // 全局变量: 生成 global alloc, 放在 Program 中
+    string global_name = "@" + name;
+    cur[name] = {false, 0, global_name, false, "", 0, true};
+    // 默认初始化为 zeroinit
+    current_program->global_allocs.push_back(
+        make_unique<GlobalAllocInst>(global_name, make_unique<ZeroInit>()));
   } else {
-    insts.push_back(make_unique<AllocInst>(alloc_name));
+    // 局部变量: alloc 在 entry_block 中
+    string alloc_name = "@" + name + "_" + to_string(alloc_counter++);
+    cur[name] = {false, 0, alloc_name, false, "", 0, false};
+    auto &insts = entry_block->instructions;
+    if (!insts.empty() && IsTerminated(*entry_block)) {
+      insts.insert(insts.end() - 1, make_unique<AllocInst>(alloc_name));
+    } else {
+      insts.push_back(make_unique<AllocInst>(alloc_name));
+    }
   }
+}
+
+// 添加函数符号到当前作用域
+static void AddFunc(const string &name, const string &ret_type, int param_count) {
+  if (scope_stack.empty()) EnterScope();
+  auto &cur = scope_stack.back();
+  if (cur.count(name)) { cerr << "error: duplicate symbol " << name << endl; return; }
+  cur[name] = {false, 0, "", true, ret_type, param_count, false};
 }
 
 static SymbolInfo *Lookup(const string &name) {
@@ -71,7 +99,6 @@ static BasicBlock *NewBB(const string &name) {
   return ptr;
 }
 
-// 检查基本块是否已终止 (最后一条指令是 br/jump/ret)
 static bool IsTerminated(const BasicBlock &bb) {
   if (bb.instructions.empty()) return false;
   auto *last = bb.instructions.back().get();
@@ -108,7 +135,11 @@ static int EvaluateConstPrimaryExp(const BaseAST &ast) {
 static int EvaluateConstUnaryExp(const BaseAST &ast) {
   const auto *unary = dynamic_cast<const UnaryExpAST*>(&ast);
   if (!unary) return 0;
-  if (unary->is_primary) return EvaluateConstPrimaryExp(*unary->primary_exp);
+  if (unary->kind == UnaryExpAST::PRIMARY) return EvaluateConstPrimaryExp(*unary->primary_exp);
+  // 函数调用和一元运算不能在常量中出现
+  if (unary->kind == UnaryExpAST::CALL) {
+    cerr << "error: function call in constant expression" << endl; return 0;
+  }
   int val = EvaluateConstUnaryExp(*unary->unary_exp);
   if (unary->op == "+") return val;
   if (unary->op == "-") return -val;
@@ -188,8 +219,6 @@ static int EvaluateConstExp(const BaseAST &ast) {
 }
 
 // ==================== IR 生成: 表达式求值 ====================
-// 所有 Evaluate* 函数的 block 参数是 BasicBlock *& (指针引用),
-// 短路求值可能创建新基本块并更新 block 指向新块.
 
 static unique_ptr<Value> EvaluateExp(const BaseAST &ast, BasicBlock *&block, int &reg_counter);
 static unique_ptr<Value> EvaluateLOrExp(const BaseAST &ast, BasicBlock *&block, int &reg_counter);
@@ -205,20 +234,63 @@ static unique_ptr<Value> EvaluateUnaryExp(const BaseAST &ast,
                                           BasicBlock *&block, int &reg_counter) {
   const auto *unary = dynamic_cast<const UnaryExpAST*>(&ast);
   if (!unary) return nullptr;
-  if (unary->is_primary) return EvaluatePrimaryExp(*unary->primary_exp, block, reg_counter);
-  auto operand = EvaluateUnaryExp(*unary->unary_exp, block, reg_counter);
-  if (!operand) return nullptr;
-  if (unary->op == "+") return operand;
-  if (unary->op == "-") {
-    int dest = reg_counter++;
-    block->instructions.push_back(make_unique<BinaryInst>(dest, "sub", make_unique<Integer>(0), std::move(operand)));
-    return make_unique<RegRef>(dest);
+
+  if (unary->kind == UnaryExpAST::PRIMARY) {
+    return EvaluatePrimaryExp(*unary->primary_exp, block, reg_counter);
   }
-  if (unary->op == "!") {
-    int dest = reg_counter++;
-    block->instructions.push_back(make_unique<BinaryInst>(dest, "eq", std::move(operand), make_unique<Integer>(0)));
-    return make_unique<RegRef>(dest);
+
+  if (unary->kind == UnaryExpAST::CALL) {
+    // 函数调用: %dest = call @func(args)  或  call @func(args) (void)
+    auto *func_info = Lookup(unary->func_name);
+    if (!func_info || !func_info->is_func) {
+      cerr << "error: undefined function " << unary->func_name << endl;
+      return make_unique<Integer>(0);
+    }
+
+    // 求值实参
+    vector<unique_ptr<Value>> args;
+    for (auto &arg : unary->args) {
+      const auto *arg_exp = dynamic_cast<const ExpAST*>(arg.get());
+      if (arg_exp) {
+        auto val = EvaluateExp(*arg_exp, block, reg_counter);
+        if (val) args.push_back(std::move(val));
+      }
+    }
+
+    string func_ref = "@" + unary->func_name;
+    if (func_info->func_ret_type == "void") {
+      // void 调用: 无返回值
+      block->instructions.push_back(
+          make_unique<CallInst>(-1, func_ref, std::move(args)));
+      return nullptr;  // void 调用无值
+    } else {
+      // int 调用: 有返回值
+      int dest = reg_counter++;
+      block->instructions.push_back(
+          make_unique<CallInst>(dest, func_ref, std::move(args)));
+      return make_unique<RegRef>(dest);
+    }
   }
+
+  // UNARY_OP
+  if (unary->kind == UnaryExpAST::UNARY_OP) {
+    auto operand = EvaluateUnaryExp(*unary->unary_exp, block, reg_counter);
+    if (!operand) return nullptr;
+    if (unary->op == "+") return operand;
+    if (unary->op == "-") {
+      int dest = reg_counter++;
+      block->instructions.push_back(
+          make_unique<BinaryInst>(dest, "sub", make_unique<Integer>(0), std::move(operand)));
+      return make_unique<RegRef>(dest);
+    }
+    if (unary->op == "!") {
+      int dest = reg_counter++;
+      block->instructions.push_back(
+          make_unique<BinaryInst>(dest, "eq", std::move(operand), make_unique<Integer>(0)));
+      return make_unique<RegRef>(dest);
+    }
+  }
+
   return nullptr;
 }
 
@@ -298,11 +370,6 @@ static unique_ptr<Value> EvaluateEqExp(const BaseAST &ast,
 }
 
 // 短路求值 &&
-//   @sc = alloc i32; store 0, @sc
-//   求值 X → lhs; br lhs, %rhs_bb, %end_bb
-// %rhs_bb: 求值 Y → rhs; %r = ne rhs, 0; store %r, @sc; jump %end_bb
-// %end_bb: %result = load @sc
-// block 更新为 %end_bb (结果所在块)
 static unique_ptr<Value> EvaluateLAndExp(const BaseAST &ast,
                                          BasicBlock *&block, int &reg_counter) {
   const auto *land = dynamic_cast<const LAndExpAST*>(&ast);
@@ -310,7 +377,6 @@ static unique_ptr<Value> EvaluateLAndExp(const BaseAST &ast,
   if (land->is_eq) return EvaluateEqExp(*land->eq_exp, block, reg_counter);
 
   string sc_alloc = "@sc_and_" + to_string(alloc_counter++);
-  // alloc 必须放在 entry 块, 否则 libkoopa 可能无法解析
   {
     auto &entry_insts = entry_block->instructions;
     if (!entry_insts.empty() && IsTerminated(*entry_block))
@@ -328,10 +394,8 @@ static unique_ptr<Value> EvaluateLAndExp(const BaseAST &ast,
   auto *rhs_bb = NewBB(rhs_name);
   auto *end_bb = NewBB(end_name);
 
-  // 分支: LHS 非0则进入 RHS, 否则短路到 end
   block->instructions.push_back(make_unique<BranchInst>(std::move(lhs_val), rhs_name, end_name));
 
-  // RHS 基本块
   auto rhs_val = EvaluateEqExp(*land->rhs, rhs_bb, reg_counter);
   if (rhs_val) {
     int r = reg_counter++;
@@ -340,19 +404,13 @@ static unique_ptr<Value> EvaluateLAndExp(const BaseAST &ast,
   }
   rhs_bb->instructions.push_back(make_unique<JumpInst>(end_name));
 
-  // End 基本块: 加载结果, 返回在 end_bb 中
   int result = reg_counter++;
   end_bb->instructions.push_back(make_unique<LoadInst>(result, sc_alloc));
-  block = end_bb;  // ★ 更新 block 指针到结果所在基本块
+  block = end_bb;
   return make_unique<RegRef>(result);
 }
 
 // 短路求值 ||
-//   @sc = alloc i32; store 1, @sc
-//   求值 X → lhs; br lhs, %end_bb, %rhs_bb
-// %rhs_bb: 求值 Y → rhs; %r = ne rhs, 0; store %r, @sc; jump %end_bb
-// %end_bb: %result = load @sc
-// block 更新为 %end_bb (结果所在块)
 static unique_ptr<Value> EvaluateLOrExp(const BaseAST &ast,
                                         BasicBlock *&block, int &reg_counter) {
   const auto *lor = dynamic_cast<const LOrExpAST*>(&ast);
@@ -360,7 +418,6 @@ static unique_ptr<Value> EvaluateLOrExp(const BaseAST &ast,
   if (lor->is_land) return EvaluateLAndExp(*lor->land_exp, block, reg_counter);
 
   string sc_alloc = "@sc_or_" + to_string(alloc_counter++);
-  // alloc 必须放在 entry 块, 否则 libkoopa 可能无法解析
   {
     auto &entry_insts = entry_block->instructions;
     if (!entry_insts.empty() && IsTerminated(*entry_block))
@@ -390,7 +447,7 @@ static unique_ptr<Value> EvaluateLOrExp(const BaseAST &ast,
 
   int result = reg_counter++;
   end_bb->instructions.push_back(make_unique<LoadInst>(result, sc_alloc));
-  block = end_bb;  // ★ 更新 block 指针到结果所在基本块
+  block = end_bb;
   return make_unique<RegRef>(result);
 }
 
@@ -422,16 +479,44 @@ static void ProcessVarDecl(const BaseAST &ast, BasicBlock *&block, int &reg_coun
   if (!decl || decl->is_const) return;
   const auto *var_decl = dynamic_cast<const VarDeclAST*>(decl->decl_body.get());
   if (!var_decl) return;
+
+  bool is_global = (scope_stack.size() == 1 && current_func == nullptr);
+
   for (auto &def : var_decl->var_defs) {
     const auto *var_def = dynamic_cast<const VarDefAST*>(def.get());
     if (!var_def) continue;
     AddVar(var_def->ident, block, reg_counter);
+
     if (var_def->has_init) {
       const auto *init_val = dynamic_cast<const InitValAST*>(var_def->init_val.get());
       if (!init_val) continue;
-      auto val = EvaluateExp(*init_val->exp, block, reg_counter);
       auto *info = Lookup(var_def->ident);
-      if (val && info) block->instructions.push_back(make_unique<StoreInst>(std::move(val), info->alloc_name));
+      if (!info) continue;
+
+      unique_ptr<Value> val;
+      if (is_global) {
+        // 全局变量初始值必须是常量
+        int const_init = EvaluateConstExp(*init_val->exp);
+        val = make_unique<Integer>(const_init);
+      } else {
+        val = EvaluateExp(*init_val->exp, block, reg_counter);
+      }
+
+      if (val && info) {
+        if (is_global) {
+          // 更新全局 alloc 的初始值 (替换默认的 zeroinit)
+          for (auto &ga : current_program->global_allocs) {
+            auto *g = dynamic_cast<GlobalAllocInst*>(ga.get());
+            if (g && g->name == info->alloc_name) {
+              g->init_val = std::move(val);
+              break;
+            }
+          }
+        } else {
+          block->instructions.push_back(
+              make_unique<StoreInst>(std::move(val), info->alloc_name));
+        }
+      }
     }
   }
 }
@@ -450,10 +535,8 @@ static void ProcessAssign(const BaseAST &ast, BasicBlock *&block, int &reg_count
   if (val) block->instructions.push_back(make_unique<StoreInst>(std::move(val), info->alloc_name));
 }
 
-// 前向声明
 static BasicBlock *ProcessStmt(const StmtAST &stmt, BasicBlock *cur, int &reg_counter);
 
-// 处理 Block 内所有 BlockItem, 支持作用域嵌套和控制流
 static BasicBlock *ProcessBlockItems(const BaseAST &ast, BasicBlock *cur, int &reg_counter) {
   const auto *block_ast = dynamic_cast<const BlockAST*>(&ast);
   if (!block_ast) return cur;
@@ -483,8 +566,12 @@ static BasicBlock *ProcessBlockItems(const BaseAST &ast, BasicBlock *cur, int &r
 static BasicBlock *ProcessStmt(const StmtAST &stmt, BasicBlock *cur, int &reg_counter) {
   switch (stmt.kind) {
   case StmtAST::RETURN: {
-    auto ret_val = EvaluateExp(*stmt.exp, cur, reg_counter);
-    if (ret_val) cur->instructions.push_back(make_unique<Return>(std::move(ret_val)));
+    if (stmt.has_ret_val) {
+      auto ret_val = EvaluateExp(*stmt.exp, cur, reg_counter);
+      if (ret_val) cur->instructions.push_back(make_unique<Return>(std::move(ret_val)));
+    } else {
+      cur->instructions.push_back(make_unique<Return>(nullptr));
+    }
     return nullptr;
   }
   case StmtAST::ASSIGN: {
@@ -492,14 +579,20 @@ static BasicBlock *ProcessStmt(const StmtAST &stmt, BasicBlock *cur, int &reg_co
     return cur;
   }
   case StmtAST::EXP_STMT: {
-    if (stmt.exp) EvaluateExp(*stmt.exp, cur, reg_counter);
+    if (stmt.exp) {
+      auto *exp = dynamic_cast<const ExpAST*>(stmt.exp.get());
+      if (exp) {
+        // 表达式语句: 求值但丢弃结果 (仅对有副作用的调用有用)
+        auto val = EvaluateExp(*stmt.exp, cur, reg_counter);
+        (void)val;  // 丢弃结果
+      }
+    }
     return cur;
   }
   case StmtAST::BLOCK: {
     return ProcessBlockItems(*stmt.block, cur, reg_counter);
   }
   case StmtAST::IF_ELSE: {
-    // EvaluateExp 可能因短路求值而更新 cur 指针
     auto cond = EvaluateExp(*stmt.exp, cur, reg_counter);
     if (!cond) return cur;
 
@@ -532,11 +625,6 @@ static BasicBlock *ProcessStmt(const StmtAST &stmt, BasicBlock *cur, int &reg_co
     return end_bb;
   }
   case StmtAST::WHILE: {
-    // while (cond) body:
-    //   entry:   jump %cond_bb
-    //   %cond_bb: %c = 求值 cond; br %c, %body_bb, %end_bb
-    //   %body_bb: ... body ...; jump %cond_bb
-    //   %end_bb:  (循环出口, break 跳转目标)
     string cond_name = "while_cond_" + to_string(bb_counter++);
     string body_name = "while_body_" + to_string(bb_counter++);
     string end_name  = "while_end_"  + to_string(bb_counter++);
@@ -545,22 +633,18 @@ static BasicBlock *ProcessStmt(const StmtAST &stmt, BasicBlock *cur, int &reg_co
     auto *body_bb = NewBB(body_name);
     auto *end_bb  = NewBB(end_name);
 
-    // 当前块跳转到条件块 (当前块不应已终止, 否则该 while 不可达)
     if (!IsTerminated(*cur))
       cur->instructions.push_back(make_unique<JumpInst>(cond_name));
 
-    // 条件块: 求值条件 (短路运算可能创建新块, 更新 cond_bb 指向结果块)
     auto cond = EvaluateExp(*stmt.exp, cond_bb, reg_counter);
     if (cond) cond_bb->instructions.push_back(make_unique<BranchInst>(std::move(cond), body_name, end_name));
 
-    // 注册循环上下文 (入栈), 处理完循环体后出栈
     break_targets.push_back(end_name);
     continue_targets.push_back(cond_name);
 
     const auto *body_stmt = dynamic_cast<const StmtAST*>(stmt.body.get());
     if (body_stmt) {
       auto *body_cont = ProcessStmt(*body_stmt, body_bb, reg_counter);
-      // 循环体末尾跳回条件块; 若体已终止 (return/break), 则无需跳回
       if (body_cont && !IsTerminated(*body_cont))
         body_cont->instructions.push_back(make_unique<JumpInst>(cond_name));
     }
@@ -575,7 +659,6 @@ static BasicBlock *ProcessStmt(const StmtAST &stmt, BasicBlock *cur, int &reg_co
       cerr << "error: break statement outside of a loop" << endl;
       return cur;
     }
-    // break → 跳到最近一层循环的结尾基本块, 并终止当前基本块
     cur->instructions.push_back(make_unique<JumpInst>(break_targets.back()));
     return nullptr;
   }
@@ -584,7 +667,6 @@ static BasicBlock *ProcessStmt(const StmtAST &stmt, BasicBlock *cur, int &reg_co
       cerr << "error: continue statement outside of a loop" << endl;
       return cur;
     }
-    // continue → 跳到最近一层循环的条件基本块, 并终止当前基本块
     cur->instructions.push_back(make_unique<JumpInst>(continue_targets.back()));
     return nullptr;
   }
@@ -592,10 +674,122 @@ static BasicBlock *ProcessStmt(const StmtAST &stmt, BasicBlock *cur, int &reg_co
   return cur;
 }
 
+// ==================== 库函数声明 ====================
+
+static void AddLibraryFunctions(Program &program) {
+  // 添加库函数到全局符号表 (在 GenerateIR 中 scope_stack[0] 已存在)
+  auto &global = scope_stack[0];
+
+  global["getint"]    = {false, 0, "", true, "i32", 0, false};
+  global["getch"]     = {false, 0, "", true, "i32", 0, false};
+  global["getarray"]  = {false, 0, "", true, "i32", 1, false};
+  global["putint"]    = {false, 0, "", true, "void", 1, false};
+  global["putch"]     = {false, 0, "", true, "void", 1, false};
+  global["putarray"]  = {false, 0, "", true, "void", 2, false};
+  global["starttime"] = {false, 0, "", true, "void", 0, false};
+  global["stoptime"]  = {false, 0, "", true, "void", 0, false};
+
+  // 生成 Koopa IR 中的 decl 语句
+  auto make_decl = [&](const string &name, const vector<string> &param_types, const string &ret) {
+    auto decl = make_unique<Function>("@" + name);
+    decl->is_decl = true;
+    for (auto &pt : param_types) {
+      decl->params.push_back({"", pt});  // decl 中参数不需要名字
+    }
+    decl->ret_type = ret;
+    program.declarations.push_back(std::move(decl));
+  };
+
+  make_decl("getint",    {},           "i32");
+  make_decl("getch",     {},           "i32");
+  make_decl("getarray",  {"*i32"},     "i32");
+  make_decl("putint",    {"i32"},      "");
+  make_decl("putch",     {"i32"},      "");
+  make_decl("putarray",  {"i32", "*i32"}, "");
+  make_decl("starttime", {},           "");
+  make_decl("stoptime",  {},           "");
+}
+
+// ==================== 处理单个函数定义 ====================
+
+static void ProcessFuncDef(const BaseAST &ast) {
+  const auto *func_def = dynamic_cast<const FuncDefAST*>(&ast);
+  if (!func_def) return;
+
+  const auto *func_type = dynamic_cast<const FuncTypeAST*>(func_def->func_type.get());
+  if (!func_type) return;
+
+  string ret_type = func_type->type;  // "int" or "void"
+  string koopa_ret = (ret_type == "int") ? "i32" : "";
+
+  // 添加函数到全局作用域
+  int param_count = func_def->has_params ? (int)func_def->params.size() : 0;
+  AddFunc(func_def->ident, ret_type, param_count);
+
+  // 创建函数
+  auto func = make_unique<Function>("@" + func_def->ident);
+  func->ret_type = koopa_ret;
+
+  // 处理形参
+  vector<string> param_names;
+  if (func_def->has_params) {
+    for (auto &p : func_def->params) {
+      const auto *fparam = dynamic_cast<const FuncFParamAST*>(p.get());
+      if (fparam) {
+        func->params.push_back({"@" + fparam->ident, "i32"});
+        param_names.push_back(fparam->ident);
+      }
+    }
+  }
+
+  current_func = func.get();
+
+  // 创建入口基本块
+  auto *entry_bb = NewBB("entry");
+  entry_block = entry_bb;
+  int reg_counter = 0;
+
+  // 进入函数作用域: 为每个形参分配局部空间并存储
+  EnterScope();
+  for (size_t i = 0; i < param_names.size(); ++i) {
+    const string &pname = param_names[i];
+    // 分配局部变量空间
+    string alloc_name = "@" + pname + "_" + to_string(alloc_counter++);
+    auto &cur = scope_stack.back();
+    cur[pname] = {false, 0, alloc_name, false, "", 0, false};
+    // alloc
+    entry_bb->instructions.push_back(make_unique<AllocInst>(alloc_name));
+    // store 形参到局部变量
+    string param_ref = "@" + pname;
+    entry_bb->instructions.push_back(
+        make_unique<StoreInst>(make_unique<AllocRef>(param_ref), alloc_name));
+  }
+
+  // 处理函数体
+  ProcessBlockItems(*func_def->block, entry_bb, reg_counter);
+  ExitScope();
+
+  // 为所有未终止的基本块补 ret 指令
+  for (auto &bb : func->blocks) {
+    if (!IsTerminated(*bb)) {
+      if (ret_type == "void") {
+        bb->instructions.push_back(make_unique<Return>(nullptr));
+      } else {
+        bb->instructions.push_back(make_unique<Return>(make_unique<Integer>(0)));
+      }
+    }
+  }
+
+  current_program->functions.push_back(std::move(func));
+  current_func = nullptr;
+  entry_block = nullptr;
+}
+
 // ==================== 主入口 ====================
 
 unique_ptr<Program> GenerateIR(const BaseAST &ast) {
   auto program = make_unique<Program>();
+  current_program = program.get();
 
   scope_stack.clear();
   alloc_counter = 0;
@@ -606,30 +800,32 @@ unique_ptr<Program> GenerateIR(const BaseAST &ast) {
   const auto *comp_unit = dynamic_cast<const CompUnitAST*>(&ast);
   if (!comp_unit) return program;
 
-  const auto *func_def = dynamic_cast<const FuncDefAST*>(comp_unit->func_def.get());
-  if (!func_def) return program;
+  // 1. 建立全局作用域
+  EnterScope();
 
-  auto func = make_unique<Function>(func_def->ident);
-  current_func = func.get();
+  // 2. 添加库函数声明
+  AddLibraryFunctions(*program);
 
-  auto *entry_bb = NewBB("entry");
-  entry_block = entry_bb;
+  // 3. 遍历 CompUnit 中的每一项
+  // 全局声明的 dummy 变量 (不实际使用, 仅满足参数引用要求)
+  BasicBlock *dummy_bb = nullptr;
+  int dummy_reg = 0;
 
-  int reg_counter = 0;
-  ProcessBlockItems(*func_def->block, entry_bb, reg_counter);
+  for (auto &item : comp_unit->items) {
+    auto *decl = dynamic_cast<const DeclAST*>(item.get());
+    auto *func_def = dynamic_cast<const FuncDefAST*>(item.get());
 
-  // 所有基本块都必须以终止指令 (jump/br/ret) 结尾, 否则 libkoopa 解析会失败.
-  // 嵌套控制流 (如 if 的 end 块) 可能为空且不是最后一个块, 只检查最后一个块会漏掉.
-  // 统一为所有未终止的块补一条 ret 0 (对应函数自然结束返回 0).
-  for (auto &bb : func->blocks) {
-    if (!IsTerminated(*bb)) {
-      bb->instructions.push_back(make_unique<Return>(make_unique<Integer>(0)));
+    if (decl) {
+      if (decl->is_const) {
+        ProcessConstDecl(*decl, dummy_bb, dummy_reg);
+      } else {
+        ProcessVarDecl(*decl, dummy_bb, dummy_reg);
+      }
+    } else if (func_def) {
+      ProcessFuncDef(*func_def);
     }
   }
 
-  program->functions.push_back(std::move(func));
-  current_func = nullptr;
-  entry_block = nullptr;
-
+  current_program = nullptr;
   return program;
 }

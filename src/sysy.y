@@ -17,72 +17,141 @@ void yyerror(std::unique_ptr<BaseAST> &ast, const char *s);
 using namespace std;
 %}
 
-// 定义 parser 函数和错误处理函数的附加参数
-// 我们需要返回一个字符串作为 AST, 所以我们把附加参数定义成字符串的智能指针
-// 解析完成后, 我们要手动修改这个参数, 把它设置成解析得到的字符串
 %parse-param { std::unique_ptr<BaseAST> &ast }
 
-// yylval 的定义, 我们把它定义成了一个联合体 (union)
-// 因为 token 的值有的是字符串指针, 有的是整数
-// 之前我们在 lexer 中用到的 str_val 和 int_val 就是在这里被定义的
-// 至于为什么要用字符串指针而不直接用 string 或者 unique_ptr<string>?
-// 请自行 STFW 在 union 里写一个带析构函数的类会出现什么情况
 %union {
   std::string *str_val;
   int int_val;
   BaseAST *ast_val;
 }
 
-// lexer 返回的所有 token 种类的声明
-// 注意 IDENT 和 INT_CONST 会返回 token 的值, 分别对应 str_val 和 int_val
-%token INT RETURN
+// ==================== Token 声明 ====================
+%token INT VOID RETURN
 %token CONST
 %token IF ELSE WHILE BREAK CONTINUE
 %token LE GE EQ NE LAND LOR
 %token <str_val> IDENT
 %token <int_val> INT_CONST
 
-// 非终结符的类型定义
-%type <ast_val> FuncDef FuncType Block Stmt Exp LOrExp LAndExp EqExp RelExp AddExp MulExp UnaryExp PrimaryExp
-%type <ast_val> Decl ConstDecl ConstDef ConstInitVal ConstExp VarDecl VarDef InitVal BlockItem BType LVal
+// ==================== 非终结符类型定义 ====================
+%type <ast_val> CompUnit CompUnitItemList
+%type <ast_val> FuncDef Type Block Stmt Exp LOrExp LAndExp EqExp RelExp AddExp MulExp UnaryExp PrimaryExp
+%type <ast_val> Decl ConstDecl ConstDef ConstInitVal ConstExp VarDecl VarDef InitVal BlockItem LVal
 %type <ast_val> BlockItemList ConstDefList VarDefList
 %type <ast_val> MatchedStmt OpenStmt
+%type <ast_val> FuncFParam FuncFParams FuncRParams
 %type <str_val> UnaryOp
 %type <int_val> Number
 
 %%
 
-// 开始符, CompUnit ::= FuncDef
+// ==================== CompUnit ====================
+// CompUnit ::= [CompUnit] (Decl | FuncDef)
 CompUnit
-  : FuncDef {
-    auto comp_unit = make_unique<CompUnitAST>();
-    comp_unit->func_def = unique_ptr<BaseAST>($1);
-    ast = move(comp_unit);
+  : CompUnitItemList {
+    auto comp_unit = dynamic_cast<CompUnitAST*>($1);
+    if (!comp_unit) {
+      // 单个 Decl 或 FuncDef
+      comp_unit = new CompUnitAST();
+      comp_unit->items.push_back(unique_ptr<BaseAST>($1));
+    }
+    ast = unique_ptr<BaseAST>(comp_unit);
   }
   ;
 
-// FuncDef ::= FuncType IDENT '(' ')' Block;
+CompUnitItemList
+  : Decl {
+    auto comp = new CompUnitAST();
+    comp->items.push_back(unique_ptr<BaseAST>($1));
+    $$ = comp;
+  }
+  | FuncDef {
+    auto comp = new CompUnitAST();
+    comp->items.push_back(unique_ptr<BaseAST>($1));
+    $$ = comp;
+  }
+  | CompUnitItemList Decl {
+    auto comp = dynamic_cast<CompUnitAST*>($1);
+    comp->items.push_back(unique_ptr<BaseAST>($2));
+    $$ = comp;
+  }
+  | CompUnitItemList FuncDef {
+    auto comp = dynamic_cast<CompUnitAST*>($1);
+    comp->items.push_back(unique_ptr<BaseAST>($2));
+    $$ = comp;
+  }
+  ;
+
+// ==================== FuncDef ====================
+// FuncDef ::= Type IDENT "(" [FuncFParams] ")" Block
 FuncDef
-  : FuncType IDENT '(' ')' Block {
-    auto ast = new FuncDefAST();
-    ast->func_type = unique_ptr<BaseAST>($1);
-    ast->ident = *unique_ptr<string>($2);
-    ast->block = unique_ptr<BaseAST>($5);
-    $$ = ast;
+  : Type IDENT '(' ')' Block {
+    auto def = new FuncDefAST();
+    def->func_type = unique_ptr<BaseAST>($1);
+    def->ident = *unique_ptr<string>($2);
+    def->has_params = false;
+    def->block = unique_ptr<BaseAST>($5);
+    $$ = def;
+  }
+  | Type IDENT '(' FuncFParams ')' Block {
+    auto def = new FuncDefAST();
+    def->func_type = unique_ptr<BaseAST>($1);
+    def->ident = *unique_ptr<string>($2);
+    def->has_params = true;
+    // FuncFParams 返回的是 FuncRParamsAST (复用), 提取 exps 作为参数列表
+    auto *params = dynamic_cast<FuncRParamsAST*>($4);
+    if (params) {
+      for (auto &p : params->exps) {
+        def->params.push_back(std::move(p));
+      }
+      delete params;
+    }
+    def->block = unique_ptr<BaseAST>($6);
+    $$ = def;
   }
   ;
 
-// FuncType ::= "int"
-FuncType
+// FuncFParams ::= FuncFParam {"," FuncFParam}
+// 复用 FuncRParamsAST 存储参数列表
+FuncFParams
+  : FuncFParam {
+    auto params = new FuncRParamsAST();
+    params->exps.push_back(unique_ptr<BaseAST>($1));
+    $$ = params;
+  }
+  | FuncFParams ',' FuncFParam {
+    auto params = dynamic_cast<FuncRParamsAST*>($1);
+    params->exps.push_back(unique_ptr<BaseAST>($3));
+    $$ = params;
+  }
+  ;
+
+// FuncFParam ::= Type IDENT
+FuncFParam
+  : Type IDENT {
+    auto param = new FuncFParamAST();
+    param->btype = unique_ptr<BaseAST>($1);
+    param->ident = *unique_ptr<string>($2);
+    $$ = param;
+  }
+  ;
+
+// Type ::= "void" | "int"
+// 将 FuncType 和 BType 合并为统一 Type, 消除 INT 的 reduce/reduce 冲突
+Type
   : INT {
     auto ast = new FuncTypeAST();
     ast->type = "int";
     $$ = ast;
   }
+  | VOID {
+    auto ast = new FuncTypeAST();
+    ast->type = "void";
+    $$ = ast;
+  }
   ;
 
-// ==================== Lv4: Block ====================
-// Block ::= "{" {BlockItem} "}"
+// ==================== Block ====================
 Block
   : '{' BlockItemList '}' {
     $$ = $2;
@@ -117,8 +186,7 @@ BlockItem
   }
   ;
 
-// ==================== Lv4: Decl ====================
-// Decl ::= ConstDecl | VarDecl
+// ==================== Decl ====================
 Decl
   : ConstDecl {
     auto ast = new DeclAST();
@@ -134,22 +202,12 @@ Decl
   }
   ;
 
-// BType ::= "int"
-BType
-  : INT {
-    auto ast = new BTypeAST();
-    ast->type = "int";
-    $$ = ast;
-  }
-  ;
-
-// ConstDecl ::= "const" BType ConstDef {"," ConstDef} ";"
+// ConstDecl ::= "const" Type ConstDef {"," ConstDef} ";"
 ConstDecl
-  : CONST BType ConstDef ConstDefList ';' {
+  : CONST Type ConstDef ConstDefList ';' {
     auto ast = new ConstDeclAST();
     ast->btype = unique_ptr<BaseAST>($2);
     ast->const_defs.push_back(unique_ptr<BaseAST>($3));
-    // ConstDefList 返回的 vector 已被合并
     auto list_ast = dynamic_cast<ConstDeclAST*>(const_cast<BaseAST*>($4));
     if (list_ast) {
       for (auto &def : list_ast->const_defs) {
@@ -161,12 +219,11 @@ ConstDecl
   }
   ;
 
-// ConstDefList: 对应 {"," ConstDef}, 即零次或多次 ",ConstDef"
-// 我们用 ConstDeclAST 临时承载 const_defs vector
+// ConstDefList: 对应 {"," ConstDef}
 ConstDefList
   : /* empty */ {
     auto ast = new ConstDeclAST();
-    ast->btype = nullptr;  // dummy
+    ast->btype = nullptr;
     $$ = ast;
   }
   | ConstDefList ',' ConstDef {
@@ -195,14 +252,14 @@ ConstInitVal
   }
   ;
 
-// ConstExp ::= Exp  (语法同 Exp, 但语义上仅允许常量)
+// ConstExp ::= Exp
 ConstExp
   : Exp { $$ = $1; }
   ;
 
-// VarDecl ::= BType VarDef {"," VarDef} ";"
+// VarDecl ::= Type VarDef {"," VarDef} ";"
 VarDecl
-  : BType VarDef VarDefList ';' {
+  : Type VarDef VarDefList ';' {
     auto ast = new VarDeclAST();
     ast->btype = unique_ptr<BaseAST>($1);
     ast->var_defs.push_back(unique_ptr<BaseAST>($2));
@@ -221,7 +278,7 @@ VarDecl
 VarDefList
   : /* empty */ {
     auto ast = new VarDeclAST();
-    ast->btype = nullptr;  // dummy
+    ast->btype = nullptr;
     $$ = ast;
   }
   | VarDefList ',' VarDef {
@@ -257,8 +314,7 @@ InitVal
   }
   ;
 
-// ==================== Lv4: LVal ====================
-// LVal ::= IDENT
+// ==================== LVal ====================
 LVal
   : IDENT {
     auto ast = new LValAST();
@@ -267,33 +323,41 @@ LVal
   }
   ;
 
-// ==================== Stmt ====================
-// Stmt ::= MatchedStmt | OpenStmt
-// 通过拆分解决空悬 else 问题:
-//   MatchedStmt: 所有非 if 语句, 以及 if-then-else (then/else 均为 MatchedStmt)
-//   OpenStmt:   if-then (无 else), 或 if-then-else 中 else 部分为 OpenStmt
-Stmt
-  : MatchedStmt {
-    $$ = $1;
+// ==================== FuncRParams ====================
+// FuncRParams ::= Exp {"," Exp}
+FuncRParams
+  : Exp {
+    auto params = new FuncRParamsAST();
+    params->exps.push_back(unique_ptr<BaseAST>($1));
+    $$ = params;
   }
-  | OpenStmt {
-    $$ = $1;
+  | FuncRParams ',' Exp {
+    auto params = dynamic_cast<FuncRParamsAST*>($1);
+    params->exps.push_back(unique_ptr<BaseAST>($3));
+    $$ = params;
   }
   ;
 
-// MatchedStmt ::= "return" Exp ";"
-//               | LVal "=" Exp ";"
-//               | [Exp] ";"
-//               | Block
-//               | "if" "(" Exp ")" MatchedStmt "else" MatchedStmt
-//               | "while" "(" Exp ")" MatchedStmt
-//               | "break" ";"
-//               | "continue" ";"
+// ==================== Stmt ====================
+Stmt
+  : MatchedStmt { $$ = $1; }
+  | OpenStmt   { $$ = $1; }
+  ;
+
+// MatchedStmt
 MatchedStmt
   : RETURN Exp ';' {
     auto ast = new StmtAST();
     ast->kind = StmtAST::RETURN;
+    ast->has_ret_val = true;
     ast->exp = unique_ptr<BaseAST>($2);
+    $$ = ast;
+  }
+  | RETURN ';' {
+    auto ast = new StmtAST();
+    ast->kind = StmtAST::RETURN;
+    ast->has_ret_val = false;
+    ast->exp = nullptr;
     $$ = ast;
   }
   | LVal '=' Exp ';' {
@@ -348,9 +412,7 @@ MatchedStmt
   }
   ;
 
-// OpenStmt ::= "if" "(" Exp ")" Stmt
-//            | "if" "(" Exp ")" MatchedStmt "else" OpenStmt
-//            | "while" "(" Exp ")" OpenStmt
+// OpenStmt
 OpenStmt
   : IF '(' Exp ')' Stmt {
     auto ast = new StmtAST();
@@ -545,16 +607,38 @@ MulExp
   }
   ;
 
+// UnaryExp ::= PrimaryExp
+//            | IDENT "(" [FuncRParams] ")"   // 函数调用
+//            | UnaryOp UnaryExp
 UnaryExp
   : PrimaryExp {
     auto ast = new UnaryExpAST();
-    ast->is_primary = true;
+    ast->kind = UnaryExpAST::PRIMARY;
     ast->primary_exp = unique_ptr<BaseAST>($1);
+    $$ = ast;
+  }
+  | IDENT '(' ')' {
+    auto ast = new UnaryExpAST();
+    ast->kind = UnaryExpAST::CALL;
+    ast->func_name = *unique_ptr<string>($1);
+    ast->has_args = false;
+    $$ = ast;
+  }
+  | IDENT '(' FuncRParams ')' {
+    auto ast = new UnaryExpAST();
+    ast->kind = UnaryExpAST::CALL;
+    ast->func_name = *unique_ptr<string>($1);
+    ast->has_args = true;
+    auto *rparams = dynamic_cast<FuncRParamsAST*>($3);
+    if (rparams) {
+      for (auto &e : rparams->exps) ast->args.push_back(std::move(e));
+      delete rparams;
+    }
     $$ = ast;
   }
   | UnaryOp UnaryExp {
     auto ast = new UnaryExpAST();
-    ast->is_primary = false;
+    ast->kind = UnaryExpAST::UNARY_OP;
     ast->op = *unique_ptr<string>($1);
     ast->unary_exp = unique_ptr<BaseAST>($2);
     $$ = ast;
@@ -601,8 +685,6 @@ Number
 
 %%
 
-// 定义错误处理函数, 其中第二个参数是错误信息
-// parser 如果发生错误 (例如输入的程序出现了语法错误), 就会调用这个函数
 void yyerror(unique_ptr<BaseAST> &ast, const char *s) {
   cerr << "error: " << s << endl;
 }
