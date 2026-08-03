@@ -80,15 +80,70 @@ class BinaryInst : public Value {
   }
 };
 
-// alloc 指令: @x = alloc i32
-class AllocInst : public Value {
+// getelemptr 指令: %dest = getelemptr src, index
+// src 必须是数组指针 (如 *[i32, 3]), 结果是元素指针 (如 *i32)
+class GetElemPtrInst : public Value {
  public:
-  std::string name;  // 带 @ 前缀, 如 "@x"
+  int dest;
+  std::string src;  // 如 "@arr" 或 "%ptr"
+  std::unique_ptr<Value> index;
 
-  AllocInst(const std::string &n) : name(n) {}
+  GetElemPtrInst(int d, const std::string &s, std::unique_ptr<Value> idx)
+    : dest(d), src(s), index(std::move(idx)) {}
 
   void Dump() const override {
-    std::cout << name << " = alloc i32";
+    std::cout << "%" << dest << " = getelemptr " << src << ", ";
+    index->Dump();
+  }
+};
+
+// getptr 指令: %dest = getptr src, index
+// src 是指针 (如 *i32), 结果是偏移后的同类型指针
+class GetPtrInst : public Value {
+ public:
+  int dest;
+  std::string src;  // 如 "%ptr" 或 "@arr"
+  std::unique_ptr<Value> index;
+
+  GetPtrInst(int d, const std::string &s, std::unique_ptr<Value> idx)
+    : dest(d), src(s), index(std::move(idx)) {}
+
+  void Dump() const override {
+    std::cout << "%" << dest << " = getptr " << src << ", ";
+    index->Dump();
+  }
+};
+
+// 聚合常量: {elem1, elem2, ...}
+// 用于全局数组初始化
+class Aggregate : public Value {
+ public:
+  std::vector<std::unique_ptr<Value>> elements;
+
+  Aggregate() = default;
+  Aggregate(std::vector<std::unique_ptr<Value>> elems)
+    : elements(std::move(elems)) {}
+
+  void Dump() const override {
+    std::cout << "{";
+    for (size_t i = 0; i < elements.size(); ++i) {
+      if (i > 0) std::cout << ", ";
+      elements[i]->Dump();
+    }
+    std::cout << "}";
+  }
+};
+
+// alloc 指令: @x = alloc i32 或 @arr = alloc [i32, 3]
+class AllocInst : public Value {
+ public:
+  std::string name;   // 带 @ 前缀, 如 "@x"
+  std::string type;   // "i32", "[i32, 3]", "[[i32, 3], 2]", 等
+
+  AllocInst(const std::string &n, const std::string &t = "i32") : name(n), type(t) {}
+
+  void Dump() const override {
+    std::cout << name << " = alloc " << type;
   }
 };
 
@@ -169,16 +224,18 @@ class Return : public Value {
 // ==================== Lv8 新增: 全局内存分配 ====================
 // global @var = alloc i32, zeroinit
 // global @var = alloc i32, 42
+// global @arr = alloc [i32, 3], {1, 2, 3}
 class GlobalAllocInst : public Value {
  public:
   std::string name;  // 带 @ 前缀, 如 "@var"
+  std::string type;  // "i32", "[i32, 3]", "[[i32, 3], 2]", 等
   std::unique_ptr<Value> init_val;
 
-  GlobalAllocInst(const std::string &n, std::unique_ptr<Value> init)
-    : name(n), init_val(std::move(init)) {}
+  GlobalAllocInst(const std::string &n, const std::string &t, std::unique_ptr<Value> init)
+    : name(n), type(t), init_val(std::move(init)) {}
 
   void Dump() const override {
-    std::cout << "global " << name << " = alloc i32, ";
+    std::cout << "global " << name << " = alloc " << type << ", ";
     init_val->Dump();
   }
 };
@@ -227,7 +284,7 @@ class BasicBlock {
 // 函数参数
 struct FuncParam {
   std::string name;  // 带 @ 前缀, 如 "@x"
-  std::string type;  // "i32"
+  std::string type;  // "i32", "*i32", "*[i32, 10]", 等
 };
 
 // 函数 (定义或声明)

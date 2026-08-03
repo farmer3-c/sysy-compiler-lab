@@ -1,10 +1,82 @@
 #include "ASMGenerator.h"
+#include <vector>
+
+// ==================== 类型大小计算 ====================
+
+// 递归计算 Koopa IR 类型的大小 (RV32I: 指针 = 4 字节)
+static int GetTypeSize(koopa_raw_type_t ty) {
+  switch (ty->tag) {
+    case KOOPA_RTT_INT32:    return 4;
+    case KOOPA_RTT_UNIT:     return 0;
+    case KOOPA_RTT_POINTER:  return 4;  // RV32I 指针 4 字节
+    case KOOPA_RTT_ARRAY: {
+      int elem_size = GetTypeSize(ty->data.array.base);
+      return elem_size * (int)ty->data.array.len;
+    }
+    case KOOPA_RTT_FUNCTION: return 0;
+    default: return 0;
+  }
+}
+
+// 递归输出 aggregate 元素
+static void EmitAggregate(std::ostream &os, koopa_raw_value_t agg_val) {
+  auto &agg = agg_val->kind.data.aggregate;
+  for (size_t i = 0; i < agg.elems.len; i++) {
+    auto elem = reinterpret_cast<koopa_raw_value_t>(agg.elems.buffer[i]);
+    if (elem->kind.tag == KOOPA_RVT_INTEGER) {
+      os << "  .word " << elem->kind.data.integer.value << "\n";
+    } else if (elem->kind.tag == KOOPA_RVT_AGGREGATE) {
+      EmitAggregate(os, elem);
+    } else if (elem->kind.tag == KOOPA_RVT_ZERO_INIT) {
+      // zeroinit inside aggregate: output zero words
+      int size = GetTypeSize(elem->ty);
+      int words = size / 4;
+      for (int w = 0; w < words; w++)
+        os << "  .word 0\n";
+    }
+  }
+}
 
 // ==================== 辅助 ====================
 
 std::string ASMGenerator::AllocReg() {
     int idx = (next_reg++) % 7;
     return "t" + std::to_string(idx);
+}
+
+// ==================== 大栈帧辅助 ====================
+
+void ASMGenerator::EmitLoadSp(const std::string &dst, int offset) {
+    if (offset >= -2048 && offset <= 2047) {
+        os << "  lw " << dst << ", " << offset << "(sp)\n";
+    } else {
+        std::string addr = AllocReg();
+        os << "  li " << addr << ", " << offset << "\n";
+        os << "  add " << addr << ", sp, " << addr << "\n";
+        os << "  lw " << dst << ", 0(" << addr << ")\n";
+    }
+}
+
+void ASMGenerator::EmitStoreSp(const std::string &src, int offset) {
+    if (offset >= -2048 && offset <= 2047) {
+        os << "  sw " << src << ", " << offset << "(sp)\n";
+    } else {
+        // 将值存入 a7 (固定 scratch 寄存器), 避免 src 被地址计算的 li t5 覆盖
+        if (src != "a7") os << "  mv a7, " << src << "\n";
+        os << "  li t5, " << offset << "\n";
+        os << "  add t5, sp, t5\n";
+        os << "  sw a7, 0(t5)\n";
+    }
+}
+
+void ASMGenerator::EmitSpAdd(const std::string &dst, int offset) {
+    if (offset >= -2048 && offset <= 2047) {
+        os << "  addi " << dst << ", sp, " << offset << "\n";
+    } else {
+        std::string off_reg = AllocReg();
+        os << "  li " << off_reg << ", " << offset << "\n";
+        os << "  add " << dst << ", sp, " << off_reg << "\n";
+    }
 }
 
 static bool HasReturnValue(koopa_raw_value_t value) {
@@ -28,7 +100,7 @@ std::string ASMGenerator::GetOperand(koopa_raw_value_t value) {
         } else {
             // 参数在调用者栈帧中, 位于当前 sp + frame_size 之上
             int offset = frame_size + (int)(arg_ref.index - 8) * 4;
-            os << "  lw " << reg << ", " << offset << "(sp)\n";
+            EmitLoadSp(reg, offset);
         }
         return reg;
     }
@@ -47,7 +119,7 @@ std::string ASMGenerator::GetOperand(koopa_raw_value_t value) {
     auto it = stack_offsets.find(value);
     if (it != stack_offsets.end()) {
         std::string reg = AllocReg();
-        os << "  lw " << reg << ", " << it->second << "(sp)\n";
+        EmitLoadSp(reg, it->second);
         return reg;
     }
 
@@ -73,7 +145,15 @@ void ASMGenerator::AssignStackOffsets(const koopa_raw_function_t &func) {
             }
 
             // 为 alloc 和所有有返回值的指令分配栈槽
-            if (inst->kind.tag == KOOPA_RVT_ALLOC || HasReturnValue(inst)) {
+            if (inst->kind.tag == KOOPA_RVT_ALLOC) {
+                // alloc: 为整个类型分配空间 (不只是 4 字节指针)
+                int size = GetTypeSize(inst->ty->data.pointer.base);
+                // 对齐到 4 字节
+                size = (size + 3) & ~3;
+                stack_offsets[inst] = offset;
+                offset += size;
+                slot_count++;
+            } else if (HasReturnValue(inst)) {
                 stack_offsets[inst] = offset;
                 offset += 4;
                 slot_count++;
@@ -96,11 +176,17 @@ void ASMGenerator::EmitPrologue() {
     os << "  .globl " << cur_func << "\n";
     os << cur_func << ":\n";
     if (frame_size > 0) {
-        os << "  addi sp, sp, -" << frame_size << "\n";
+        if (frame_size <= 2047) {
+            os << "  addi sp, sp, -" << frame_size << "\n";
+        } else {
+            std::string tmp = AllocReg();
+            os << "  li " << tmp << ", " << frame_size << "\n";
+            os << "  sub sp, sp, " << tmp << "\n";
+        }
     }
     // 非叶子函数保存 ra
     if (!is_leaf) {
-        os << "  sw ra, " << (frame_size - 4) << "(sp)\n";
+        EmitStoreSp("ra", frame_size - 4);
     }
 }
 
@@ -108,10 +194,16 @@ void ASMGenerator::EmitEpilogue() {
     os << ".L" << cur_func << "_exit:\n";
     // 非叶子函数恢复 ra
     if (!is_leaf) {
-        os << "  lw ra, " << (frame_size - 4) << "(sp)\n";
+        EmitLoadSp("ra", frame_size - 4);
     }
     if (frame_size > 0) {
-        os << "  addi sp, sp, " << frame_size << "\n";
+        if (frame_size <= 2047) {
+            os << "  addi sp, sp, " << frame_size << "\n";
+        } else {
+            std::string tmp = AllocReg();
+            os << "  li " << tmp << ", " << frame_size << "\n";
+            os << "  add sp, sp, " << tmp << "\n";
+        }
     }
     os << "  ret\n";
 }
@@ -139,9 +231,12 @@ void ASMGenerator::Visit(const koopa_raw_program_t &program) {
 
             auto init = val->kind.data.global_alloc.init;
             if (init->kind.tag == KOOPA_RVT_ZERO_INIT) {
-                os << "  .zero 4\n";
+                int size = GetTypeSize(val->ty->data.pointer.base);
+                os << "  .zero " << size << "\n";
             } else if (init->kind.tag == KOOPA_RVT_INTEGER) {
                 os << "  .word " << init->kind.data.integer.value << "\n";
+            } else if (init->kind.tag == KOOPA_RVT_AGGREGATE) {
+                EmitAggregate(os, init);
             }
         }
     }
@@ -231,12 +326,19 @@ void ASMGenerator::Visit(const koopa_raw_value_t &value) {
             if (!name.empty() && name[0] == '@') name = name.substr(1);
             os << "  la " << r << ", " << name << "\n";
             os << "  lw " << r << ", 0(" << r << ")" << "\n";
-        } else {
-            // 局部变量加载
+        } else if (load.src->kind.tag == KOOPA_RVT_ALLOC) {
+            // 局部 alloc: lw 直接从栈上加载
             int src_offset = stack_offsets[load.src];
-            os << "  lw " << r << ", " << src_offset << "(sp)\n";
+            EmitLoadSp(r, src_offset);
+        } else {
+            // getelemptr/getptr/其他: src 的值是一个指针
+            // 先加载指针值, 再通过指针加载数据
+            int src_offset = stack_offsets[load.src];
+            std::string ptr_reg = AllocReg();
+            EmitLoadSp(ptr_reg, src_offset);
+            os << "  lw " << r << ", 0(" << ptr_reg << ")\n";
         }
-        os << "  sw " << r << ", " << dst_offset << "(sp)\n";
+        EmitStoreSp(r, dst_offset);
         break;
     }
 
@@ -251,12 +353,141 @@ void ASMGenerator::Visit(const koopa_raw_value_t &value) {
             if (!name.empty() && name[0] == '@') name = name.substr(1);
             os << "  la " << r << ", " << name << "\n";
             os << "  sw " << val_reg << ", 0(" << r << ")\n";
-        } else {
-            // 局部变量存储
+        } else if (store.dest->kind.tag == KOOPA_RVT_ALLOC) {
+            // 局部 alloc: sw 直接存到栈上
             std::string val_reg = GetOperand(store.value);
             int dest_offset = stack_offsets[store.dest];
-            os << "  sw " << val_reg << ", " << dest_offset << "(sp)\n";
+            EmitStoreSp(val_reg, dest_offset);
+        } else {
+            // getelemptr/getptr/其他: dest 的值是一个指针
+            // 先加载指针值, 再通过指针存储
+            std::string val_reg = GetOperand(store.value);
+            int dest_offset = stack_offsets[store.dest];
+            std::string ptr_reg = AllocReg();
+            EmitLoadSp(ptr_reg, dest_offset);
+            os << "  sw " << val_reg << ", 0(" << ptr_reg << ")\n";
         }
+        break;
+    }
+
+    case KOOPA_RVT_GET_ELEM_PTR: {
+        auto &gep = value->kind.data.get_elem_ptr;
+
+        // 获取源地址: 数组指针
+        std::string src_reg;
+        if (gep.src->kind.tag == KOOPA_RVT_GLOBAL_ALLOC) {
+            std::string name = gep.src->name;
+            if (!name.empty() && name[0] == '@') name = name.substr(1);
+            src_reg = AllocReg();
+            os << "  la " << src_reg << ", " << name << "\n";
+        } else if (gep.src->kind.tag == KOOPA_RVT_ALLOC) {
+            // alloc 指令: 从栈上取地址
+            auto it = stack_offsets.find(gep.src);
+            if (it != stack_offsets.end()) {
+                src_reg = AllocReg();
+                EmitSpAdd(src_reg, it->second);
+            }
+        } else {
+            // 其他情况: 从栈上加载地址值
+            auto it = stack_offsets.find(gep.src);
+            if (it != stack_offsets.end()) {
+                src_reg = AllocReg();
+                EmitLoadSp(src_reg, it->second);
+            }
+        }
+
+        // 获取索引值
+        std::string idx_reg = GetOperand(gep.index);
+
+        // 计算元素大小: src 是 *[T, N] 数组指针
+        int elem_size = 0;
+        if (gep.src->ty->tag == KOOPA_RTT_POINTER &&
+            gep.src->ty->data.pointer.base->tag == KOOPA_RTT_ARRAY) {
+            elem_size = GetTypeSize(gep.src->ty->data.pointer.base->data.array.base);
+        }
+
+        // 计算偏移量: index * elem_size
+        std::string offset_reg = AllocReg();
+        if (elem_size == 1) {
+            os << "  mv " << offset_reg << ", " << idx_reg << "\n";
+        } else if (elem_size == 2) {
+            os << "  slli " << offset_reg << ", " << idx_reg << ", 1\n";
+        } else if (elem_size == 4) {
+            os << "  slli " << offset_reg << ", " << idx_reg << ", 2\n";
+        } else if (elem_size == 8) {
+            os << "  slli " << offset_reg << ", " << idx_reg << ", 3\n";
+        } else {
+            std::string size_reg = AllocReg();
+            os << "  li " << size_reg << ", " << elem_size << "\n";
+            os << "  mul " << offset_reg << ", " << idx_reg << ", " << size_reg << "\n";
+        }
+
+        // 计算目标地址: src + offset
+        std::string result_reg = AllocReg();
+        os << "  add " << result_reg << ", " << src_reg << ", " << offset_reg << "\n";
+
+        // 保存结果到栈
+        int dst_offset = stack_offsets[value];
+        EmitStoreSp(result_reg, dst_offset);
+        break;
+    }
+
+    case KOOPA_RVT_GET_PTR: {
+        auto &gp = value->kind.data.get_ptr;
+
+        // 获取源地址 (指针)
+        std::string src_reg;
+        if (gp.src->kind.tag == KOOPA_RVT_GLOBAL_ALLOC) {
+            std::string name = gp.src->name;
+            if (!name.empty() && name[0] == '@') name = name.substr(1);
+            src_reg = AllocReg();
+            os << "  la " << src_reg << ", " << name << "\n";
+        } else if (gp.src->kind.tag == KOOPA_RVT_ALLOC) {
+            auto it = stack_offsets.find(gp.src);
+            if (it != stack_offsets.end()) {
+                src_reg = AllocReg();
+                EmitSpAdd(src_reg, it->second);
+            }
+        } else {
+            auto it = stack_offsets.find(gp.src);
+            if (it != stack_offsets.end()) {
+                src_reg = AllocReg();
+                EmitLoadSp(src_reg, it->second);
+            }
+        }
+
+        // 获取索引值
+        std::string idx_reg = GetOperand(gp.index);
+
+        // 计算元素大小: src 是 *T 指针, 取 base 作为元素
+        int elem_size = 0;
+        if (gp.src->ty->tag == KOOPA_RTT_POINTER) {
+            elem_size = GetTypeSize(gp.src->ty->data.pointer.base);
+        }
+
+        // 计算偏移量: index * elem_size
+        std::string offset_reg = AllocReg();
+        if (elem_size == 1) {
+            os << "  mv " << offset_reg << ", " << idx_reg << "\n";
+        } else if (elem_size == 2) {
+            os << "  slli " << offset_reg << ", " << idx_reg << ", 1\n";
+        } else if (elem_size == 4) {
+            os << "  slli " << offset_reg << ", " << idx_reg << ", 2\n";
+        } else if (elem_size == 8) {
+            os << "  slli " << offset_reg << ", " << idx_reg << ", 3\n";
+        } else {
+            std::string size_reg = AllocReg();
+            os << "  li " << size_reg << ", " << elem_size << "\n";
+            os << "  mul " << offset_reg << ", " << idx_reg << ", " << size_reg << "\n";
+        }
+
+        // 计算目标地址: src + offset
+        std::string result_reg = AllocReg();
+        os << "  add " << result_reg << ", " << src_reg << ", " << offset_reg << "\n";
+
+        // 保存结果到栈
+        int dst_offset = stack_offsets[value];
+        EmitStoreSp(result_reg, dst_offset);
         break;
     }
 
@@ -320,7 +551,7 @@ void ASMGenerator::Visit(const koopa_raw_value_t &value) {
         }
 
         int dst_offset = stack_offsets[value];
-        os << "  sw " << dst_reg << ", " << dst_offset << "(sp)\n";
+        EmitStoreSp(dst_reg, dst_offset);
         break;
     }
 
@@ -351,31 +582,34 @@ void ASMGenerator::Visit(const koopa_raw_value_t &value) {
         // 函数调用
         auto &call = value->kind.data.call;
         int num_args = (int)call.args.len;
-
-        // 对于超过 8 个的参数, 需要在栈上分配空间
         int extra_args = num_args > 8 ? num_args - 8 : 0;
-        if (extra_args > 0) {
-            os << "  addi sp, sp, -" << (extra_args * 4) << "\n";
-            for (int i = 8; i < num_args; ++i) {
-                auto arg = reinterpret_cast<koopa_raw_value_t>(call.args.buffer[i]);
-                std::string arg_reg = GetOperand(arg);
-                os << "  sw " << arg_reg << ", " << ((i - 8) * 4) << "(sp)\n";
-            }
-        }
 
-        // 前 8 个参数放入 a0-a7
+        // 1. 前 8 个参数: 加载后立即 mv 到 a0-a7 (sp 未被修改, 偏移正确)
         for (int i = 0; i < num_args && i < 8; ++i) {
             auto arg = reinterpret_cast<koopa_raw_value_t>(call.args.buffer[i]);
             std::string arg_reg = GetOperand(arg);
             os << "  mv a" << i << ", " << arg_reg << "\n";
         }
 
-        // 调用
+        // 2. 超过 8 个的参数: 先加载值 (sp 未被修改), 再调整 sp, 再存入栈
+        std::vector<std::string> extra_regs;
+        for (int i = 8; i < num_args; ++i) {
+            auto arg = reinterpret_cast<koopa_raw_value_t>(call.args.buffer[i]);
+            extra_regs.push_back(GetOperand(arg));
+        }
+        if (extra_args > 0) {
+            os << "  addi sp, sp, -" << (extra_args * 4) << "\n";
+            for (int i = 0; i < extra_args; ++i) {
+                os << "  sw " << extra_regs[i] << ", " << (i * 4) << "(sp)\n";
+            }
+        }
+
+        // 3. 调用
         std::string func_name = call.callee->name;
         if (!func_name.empty() && func_name[0] == '@') func_name = func_name.substr(1);
         os << "  call " << func_name << "\n";
 
-        // 恢复 sp
+        // 4. 恢复 sp
         if (extra_args > 0) {
             os << "  addi sp, sp, " << (extra_args * 4) << "\n";
         }
@@ -383,7 +617,7 @@ void ASMGenerator::Visit(const koopa_raw_value_t &value) {
         // 保存返回值 (如果有)
         if (HasReturnValue(value)) {
             int dst_offset = stack_offsets[value];
-            os << "  sw a0, " << dst_offset << "(sp)\n";
+            EmitStoreSp("a0", dst_offset);
         }
         break;
     }
@@ -396,7 +630,7 @@ void ASMGenerator::Visit(const koopa_raw_value_t &value) {
                 os << "  li a0, " << ret.value->kind.data.integer.value << "\n";
             } else {
                 int offset = stack_offsets[ret.value];
-                os << "  lw a0, " << offset << "(sp)\n";
+                EmitLoadSp("a0", offset);
             }
         }
         // 跳转到函数出口

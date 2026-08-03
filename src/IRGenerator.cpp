@@ -2,19 +2,24 @@
 #include <unordered_map>
 #include <vector>
 #include <iostream>
+#include <functional>
 
 using namespace std;
 
 // ==================== 符号表 ====================
 
 struct SymbolInfo {
-  bool is_const;
-  int const_val;
+  bool is_const = false;
+  int const_val = 0;
   string alloc_name;       // 局部变量: "@name_N"; 全局变量: "@name"
-  bool is_func;            // true: 函数符号
-  string func_ret_type;   // "i32" 或 "void"
-  int func_param_count;   // 形参个数
-  bool is_global;         // true: 全局变量 (alloc 在 Program 级别)
+  bool is_func = false;    // true: 函数符号
+  string func_ret_type;    // "i32" 或 "void"
+  int func_param_count = 0; // 形参个数
+  bool is_global = false;  // true: 全局变量 (alloc 在 Program 级别)
+  bool is_array = false;   // true: 数组变量
+  vector<int> dims;        // 数组各维长度 (标量时为空)
+  bool is_array_param = false; // true: 函数数组形参 (第一维省略, 实际是指针)
+  int param_index = 0;     // 形参在函数中的位置 (从 0 开始)
 };
 
 static vector<unordered_map<string, SymbolInfo>> scope_stack;
@@ -39,48 +44,92 @@ static void AddConst(const string &name, int val) {
   if (scope_stack.empty()) EnterScope();
   auto &cur = scope_stack.back();
   if (cur.count(name)) { cerr << "error: duplicate symbol " << name << endl; return; }
-  cur[name] = {true, val, "", false, "", 0, false};
+  cur[name] = {true, val, "", false, "", 0, false, false, {}, false, 0};
 }
 
 static bool IsTerminated(const BasicBlock &bb);
 
+// ==================== 类型/数组辅助函数 ====================
+
+// 构建 Koopa IR 类型字符串
+static string MakeArrayType(const vector<int> &dims) {
+  string t = "i32";
+  for (auto it = dims.rbegin(); it != dims.rend(); ++it) {
+    t = "[" + t + ", " + to_string(*it) + "]";
+  }
+  return t;
+}
+
+static string MakeFuncArrayParamType(const vector<int> &dims) {
+  string t = "i32";
+  for (auto it = dims.rbegin(); it != dims.rend(); ++it) {
+    t = "[" + t + ", " + to_string(*it) + "]";
+  }
+  return "*" + t;
+}
+
 // 添加变量: 局部变量在 entry_block 中生成 alloc 指令
 // 全局变量在 Program 中生成 global alloc
-static void AddVar(const string &name, BasicBlock * /*block*/, int &reg_counter) {
+// dims: 数组维度 (标量时为空)
+static void AddVar(const string &name, const vector<int> &dims,
+                   BasicBlock * /*block*/, int &reg_counter) {
   if (scope_stack.empty()) EnterScope();
   auto &cur = scope_stack.back();
   if (cur.count(name)) { cerr << "error: duplicate symbol " << name << endl; return; }
 
   // 判断是否在全局作用域 (仅全局作用域一层, 即 scope_stack.size() == 1)
-  bool is_global = (scope_stack.size() == 1 &&
-                    current_func == nullptr);
+  bool is_global = (scope_stack.size() == 1 && current_func == nullptr);
+  string koopa_type = dims.empty() ? "i32" : MakeArrayType(dims);
 
   if (is_global) {
     // 全局变量: 生成 global alloc, 放在 Program 中
     string global_name = "@" + name;
-    cur[name] = {false, 0, global_name, false, "", 0, true};
-    // 默认初始化为 zeroinit
+    SymbolInfo info;
+    info.is_const = false;
+    info.const_val = 0;
+    info.alloc_name = global_name;
+    info.is_func = false;
+    info.is_global = true;
+    info.is_array = !dims.empty();
+    info.dims = dims;
+    info.is_array_param = false;  // 全局变量不是函数形参
+    cur[name] = info;
+    // 默认初始化为 zeroinit, 后续由 ProcessVarDecl 替换
     current_program->global_allocs.push_back(
-        make_unique<GlobalAllocInst>(global_name, make_unique<ZeroInit>()));
+        make_unique<GlobalAllocInst>(global_name, koopa_type, make_unique<ZeroInit>()));
   } else {
     // 局部变量: alloc 在 entry_block 中
     string alloc_name = "@" + name + "_" + to_string(alloc_counter++);
-    cur[name] = {false, 0, alloc_name, false, "", 0, false};
+    SymbolInfo info;
+    info.is_const = false;
+    info.const_val = 0;
+    info.alloc_name = alloc_name;
+    info.is_func = false;
+    info.is_global = false;
+    info.is_array = !dims.empty();
+    info.dims = dims;
+    info.is_array_param = false;  // 局部变量不是函数形参
+    cur[name] = info;
     auto &insts = entry_block->instructions;
     if (!insts.empty() && IsTerminated(*entry_block)) {
-      insts.insert(insts.end() - 1, make_unique<AllocInst>(alloc_name));
+      insts.insert(insts.end() - 1, make_unique<AllocInst>(alloc_name, koopa_type));
     } else {
-      insts.push_back(make_unique<AllocInst>(alloc_name));
+      insts.push_back(make_unique<AllocInst>(alloc_name, koopa_type));
     }
   }
 }
+
+// // 重载: 标量版本 (向后兼容)
+// static void AddVar(const string &name, BasicBlock *block, int &reg_counter) {
+//   AddVar(name, {}, block, reg_counter);
+// }
 
 // 添加函数符号到当前作用域
 static void AddFunc(const string &name, const string &ret_type, int param_count) {
   if (scope_stack.empty()) EnterScope();
   auto &cur = scope_stack.back();
   if (cur.count(name)) { cerr << "error: duplicate symbol " << name << endl; return; }
-  cur[name] = {false, 0, "", true, ret_type, param_count, false};
+  cur[name] = {false, 0, "", true, ret_type, param_count, false, false, {}, false, 0};
 }
 
 static SymbolInfo *Lookup(const string &name) {
@@ -218,6 +267,135 @@ static int EvaluateConstExp(const BaseAST &ast) {
   return EvaluateConstLOrExp(*exp->lor_exp);
 }
 
+// ==================== 初始化列表展平 ====================
+
+// 将嵌套的 ConstInitVal 展平为一维整数向量 (编译时)
+static void FlattenConstInit(const vector<int> &dims, int dim_start,
+                              const ConstInitValAST &init,
+                              vector<int> &result) {
+  int total_in_sub = 1;
+  for (int i = dim_start; i < (int)dims.size(); i++) total_in_sub *= dims[i];
+
+  if (init.is_list) {
+    for (auto &item : init.items) {
+      auto *sub = dynamic_cast<ConstInitValAST*>(item.get());
+      if (!sub) continue;
+      if (sub->is_list) {
+        int pos = (int)result.size();
+        int innermost = dims.back();
+        if (pos % innermost != 0) {
+          cerr << "warning: init list not aligned to innermost dimension boundary" << endl;
+          while (pos % innermost != 0) { result.push_back(0); pos++; }
+        }
+        // 找到对齐的边界, 确定此嵌套列表对应的维度
+        // 从最内层向外检查: 第一个 不 对齐的边界的外一层即目标
+        // pos==0 时所有边界都对齐, 目标为 dim_start+1 (更内一层)
+        int target;
+        if (pos == 0 && dim_start + 1 < (int)dims.size()) {
+          target = dim_start + 1;
+        } else {
+          target = dim_start;
+          int stride = 1;
+          for (int d = (int)dims.size() - 1; d >= dim_start; d--) {
+            stride *= dims[d];
+            if (pos % stride == 0) target = d;
+          }
+        }
+        FlattenConstInit(dims, target, *sub, result);
+      } else {
+        result.push_back(EvaluateConstExp(*sub->exp));
+      }
+    }
+    while ((int)result.size() % total_in_sub != 0)
+      result.push_back(0);
+  } else {
+    result.push_back(EvaluateConstExp(*init.exp));
+  }
+}
+
+// 构建嵌套的 Aggregate 常量 (用于多维全局数组初始化)
+// dims = [2, 3], flat = [1,2,3,4,5,6] → {{1,2,3},{4,5,6}}
+static unique_ptr<Aggregate> BuildNestedAggregate(const vector<int> &dims,
+                                                    int dim_start,
+                                                    const vector<int> &flat,
+                                                    size_t &pos) {
+  auto agg = make_unique<Aggregate>();
+  int cur_dim = dim_start < (int)dims.size() ? dims[dim_start] : 0;
+
+  if (dim_start == (int)dims.size() - 1) {
+    // 最内层维度: 直接用 Integer 填充
+    for (int i = 0; i < cur_dim; i++) {
+      agg->elements.push_back(make_unique<Integer>(flat[pos++]));
+    }
+  } else {
+    // 外层维度: 递归创建嵌套 Aggregate
+    for (int i = 0; i < cur_dim; i++) {
+      agg->elements.push_back(BuildNestedAggregate(dims, dim_start + 1, flat, pos));
+    }
+  }
+  return agg;
+}
+
+// 数组访问辅助: 计算 flat_index → 多维索引
+// dims = [2, 3] → stride = [3, 1]; flat_idx=4 → [1, 1]
+static vector<int> FlatToMultiIndex(const vector<int> &dims, int flat_idx) {
+  vector<int> indices;
+  int n = (int)dims.size();
+  for (int i = n - 1; i >= 0; i--) {
+    indices.push_back(flat_idx % dims[i]);
+    flat_idx /= dims[i];
+  }
+  reverse(indices.begin(), indices.end());
+  return indices;
+}
+
+// 生成多维数组访问的 getelemptr/getptr 链
+// base: 数组/指针的 alloc 名称 (如 "@arr") 或寄存器引用 (如 "%0")
+// dims: 变量声明的维度
+// is_array_param: true 表示是函数数组参数 (第一维用 getptr, 后续用 getelemptr)
+// index_vals: 各维索引值 (Integer 或 RegRef), 所有权被转移
+static string GenerateArrayAccess(const string &base_alloc,
+                                   const vector<int> &dims,
+                                   bool is_array_param,
+                                   vector<unique_ptr<Value>> &index_vals,
+                                   BasicBlock *&block, int &reg_counter) {
+  string src = base_alloc;
+  int n_idx = (int)index_vals.size();
+
+  if (n_idx == 0) return base_alloc;  // 标量, 直接返回
+
+  if (is_array_param) {
+    // 数组参数: alloc 的类型是 **[...] (存的是指针),
+    // 必须先 load 拿到实际的 *[...] 指针值, 再做指针运算
+    int ld = reg_counter++;
+    block->instructions.push_back(make_unique<LoadInst>(ld, src));
+    src = "%" + to_string(ld);
+
+    // 第一维用 getptr
+    int dest = reg_counter++;
+    block->instructions.push_back(
+        make_unique<GetPtrInst>(dest, src, std::move(index_vals[0])));
+    src = "%" + to_string(dest);
+
+    // 后续维度用 getelemptr (如果有)
+    for (int i = 1; i < n_idx; i++) {
+      int d = reg_counter++;
+      block->instructions.push_back(
+          make_unique<GetElemPtrInst>(d, src, std::move(index_vals[i])));
+      src = "%" + to_string(d);
+    }
+  } else {
+    // 局部/全局数组: 所有维度都用 getelemptr
+    for (int i = 0; i < n_idx; i++) {
+      int dest = reg_counter++;
+      block->instructions.push_back(
+          make_unique<GetElemPtrInst>(dest, src, std::move(index_vals[i])));
+      src = "%" + to_string(dest);
+    }
+  }
+  return src;
+}
+
 // ==================== IR 生成: 表达式求值 ====================
 
 static unique_ptr<Value> EvaluateExp(const BaseAST &ast, BasicBlock *&block, int &reg_counter);
@@ -302,9 +480,65 @@ static unique_ptr<Value> EvaluatePrimaryExp(const BaseAST &ast,
   if (primary->is_lval) {
     auto *info = Lookup(primary->ident);
     if (!info) { cerr << "error: undefined symbol " << primary->ident << endl; return make_unique<Integer>(0); }
-    if (info->is_const) return make_unique<Integer>(info->const_val);
+
+    if (info->is_const && !info->is_array) return make_unique<Integer>(info->const_val);
+
+    if (!primary->has_indices) {
+      // 标量或数组名 (用于地址传递, 如函数参数)
+      if (info->is_array) {
+        if (info->is_array_param) {
+          // 数组形参退化: 形参 alloc 存的是指针, load 得到指针值
+          // 例如 int arr[] 传给另一个 int[] 参数, 需要 *i32
+          int ld = reg_counter++;
+          block->instructions.push_back(make_unique<LoadInst>(ld, info->alloc_name));
+          return make_unique<AllocRef>("%" + to_string(ld));
+        }
+        // 普通数组退化: getelemptr @arr, 0 获取第一个元素的地址
+        // 只做一次 getelemptr: 2D 数组 → *[i32,N2] (指向第一行), 而非 *i32
+        vector<unique_ptr<Value>> idx_vals;
+        idx_vals.push_back(make_unique<Integer>(0));
+        string ptr = GenerateArrayAccess(info->alloc_name, info->dims,
+                                          false, idx_vals,
+                                          block, reg_counter);
+        // 返回指针值 (作为 *elem), ptr 已经是 "%N" 格式
+        return make_unique<AllocRef>(ptr);
+      }
+      if (info->is_const) return make_unique<Integer>(info->const_val);
+      int dest = reg_counter++;
+      block->instructions.push_back(make_unique<LoadInst>(dest, info->alloc_name));
+      return make_unique<RegRef>(dest);
+    }
+
+    // 数组索引访问: LVal["[" Exp "]"]
+    // 1. 求值索引表达式
+    vector<unique_ptr<Value>> idx_vals;
+    for (auto &idx : primary->indices) {
+      auto val = EvaluateExp(*idx, block, reg_counter);
+      if (val) idx_vals.push_back(std::move(val));
+      else idx_vals.push_back(make_unique<Integer>(0));
+    }
+
+    // 2. 生成 getelemptr/getptr 链
+    string ptr = GenerateArrayAccess(info->alloc_name, info->dims,
+                                      info->is_array_param, idx_vals,
+                                      block, reg_counter);
+
+    // 实际总维数: 数组形参第一维省略 (dims 不含第一维)
+    int total_dims = (int)info->dims.size() + (info->is_array_param ? 1 : 0);
+
+    if ((int)primary->indices.size() < total_dims) {
+      // 部分解引用: 结果是子数组, 作为实参传递
+      // 子数组作为值使用时需要 decay (C 中数组到指针的隐式转换)
+      // 添加一个 getelemptr 0 将子数组指针 decay 到其第一个元素的指针
+      vector<unique_ptr<Value>> decay_idx;
+      decay_idx.push_back(make_unique<Integer>(0));
+      string p2 = GenerateArrayAccess(ptr, {}, false, decay_idx, block, reg_counter);
+      return make_unique<AllocRef>(p2);
+    }
+
+    // 3. 完整访问: load
     int dest = reg_counter++;
-    block->instructions.push_back(make_unique<LoadInst>(dest, info->alloc_name));
+    block->instructions.push_back(make_unique<LoadInst>(dest, ptr));
     return make_unique<RegRef>(dest);
   }
   return EvaluateExp(*primary->exp, block, reg_counter);
@@ -460,7 +694,7 @@ static unique_ptr<Value> EvaluateExp(const BaseAST &ast,
 
 // ==================== 处理声明 ====================
 
-static void ProcessConstDecl(const BaseAST &ast, BasicBlock *, int &) {
+static void ProcessConstDecl(const BaseAST &ast, BasicBlock *block, int &reg_counter) {
   const auto *decl = dynamic_cast<const DeclAST*>(&ast);
   if (!decl || !decl->is_const) return;
   const auto *const_decl = dynamic_cast<const ConstDeclAST*>(decl->decl_body.get());
@@ -468,9 +702,164 @@ static void ProcessConstDecl(const BaseAST &ast, BasicBlock *, int &) {
   for (auto &def : const_decl->const_defs) {
     const auto *const_def = dynamic_cast<const ConstDefAST*>(def.get());
     if (!const_def) continue;
+
+    // 求值数组维度
+    vector<int> dims;
+    for (auto &d : const_def->dims) {
+      dims.push_back(EvaluateConstExp(*d));
+    }
+
     const auto *init = dynamic_cast<const ConstInitValAST*>(const_def->init_val.get());
     if (!init) continue;
-    AddConst(const_def->ident, EvaluateConstExp(*init->exp));
+
+    if (dims.empty()) {
+      // 标量常量: 直接求值并折叠
+      AddConst(const_def->ident, EvaluateConstExp(*init->exp));
+    } else {
+      // 常量数组: 需要在 IR 中分配 (标量值不用存符号表, 但数组必须分配)
+      // 只考虑整数类型的常量定义, 为数组生成 alloc
+      // 先记录到符号表, 但标记为常量数组
+      bool is_global = (scope_stack.size() == 1 && current_func == nullptr);
+
+      if (is_global) {
+        string global_name = "@" + const_def->ident;
+        string koopa_type = MakeArrayType(dims);
+        SymbolInfo info;
+        info.is_const = true;
+        info.const_val = 0;
+        info.alloc_name = global_name;
+        info.is_func = false;
+        info.is_global = true;
+        info.is_array = true;
+        info.dims = dims;
+        info.is_array_param = false;  // 全局常量数组不是函数形参
+        auto &cur = scope_stack.back();
+        cur[const_def->ident] = info;
+
+        // 展平初始化列表
+        vector<int> flat;
+        FlattenConstInit(dims, 0, *init, flat);
+        int total = 1;
+        for (int d : dims) total *= d;
+        while ((int)flat.size() < total) flat.push_back(0);
+
+        // 生成 Aggregate 常量
+        if (dims.size() <= 1) {
+          vector<unique_ptr<Value>> elems;
+          for (int v : flat) elems.push_back(make_unique<Integer>(v));
+          current_program->global_allocs.push_back(
+              make_unique<GlobalAllocInst>(global_name, koopa_type,
+                  make_unique<Aggregate>(std::move(elems))));
+        } else {
+          size_t pos = 0;
+          auto nested = BuildNestedAggregate(dims, 0, flat, pos);
+          current_program->global_allocs.push_back(
+              make_unique<GlobalAllocInst>(global_name, koopa_type, std::move(nested)));
+        }
+      } else {
+        // 局部常量数组
+        string alloc_name = "@" + const_def->ident + "_" + to_string(alloc_counter++);
+        string koopa_type = MakeArrayType(dims);
+        SymbolInfo info;
+        info.is_const = true;
+        info.const_val = 0;
+        info.alloc_name = alloc_name;
+        info.is_func = false;
+        info.is_global = false;
+        info.is_array = true;
+        info.dims = dims;
+        info.is_array_param = false;  // 局部常量数组不是函数形参
+        auto &cur = scope_stack.back();
+        cur[const_def->ident] = info;
+
+        auto &insts = entry_block->instructions;
+        if (!insts.empty() && IsTerminated(*entry_block))
+          insts.insert(insts.end() - 1, make_unique<AllocInst>(alloc_name, koopa_type));
+        else
+          insts.push_back(make_unique<AllocInst>(alloc_name, koopa_type));
+
+        // 展平并生成存储
+        vector<int> flat;
+        FlattenConstInit(dims, 0, *init, flat);
+        int total = 1;
+        for (int d : dims) total *= d;
+        while ((int)flat.size() < total) flat.push_back(0);
+
+        // 为常量数组生成 getelemptr + store 初始化
+        BasicBlock *init_block = block ? block : entry_block;
+        // 遍历所有常量值, 生成 getelemptr + store
+        for (size_t i = 0; i < flat.size(); i++) {
+          auto multi = FlatToMultiIndex(dims, (int)i);
+          vector<unique_ptr<Value>> idx_vals;
+          for (int m : multi) idx_vals.push_back(make_unique<Integer>(m));
+          string ptr = GenerateArrayAccess(alloc_name, dims, false, idx_vals, init_block, reg_counter);
+          init_block->instructions.push_back(
+              make_unique<StoreInst>(make_unique<Integer>(flat[i]), ptr));
+        }
+      }
+    }
+  }
+}
+
+// 运行时求值 InitVal, 得到所有元素的值
+// 返回 flat vector of Values (reg refs)
+static void EvalInitToFlat(const vector<int> &dims, int dim_start,
+                            const InitValAST &init,
+                            BasicBlock *&block, int &reg_counter,
+                            vector<unique_ptr<Value>> &result) {
+  int total_in_sub = 1;
+  for (int i = dim_start; i < (int)dims.size(); i++) total_in_sub *= dims[i];
+
+  if (init.is_list) {
+    for (auto &item : init.items) {
+      auto *sub = dynamic_cast<InitValAST*>(item.get());
+      if (!sub) continue;
+      if (sub->is_list) {
+        int pos = (int)result.size();
+        int innermost = dims.back();
+        if (pos % innermost != 0) {
+          while (pos % innermost != 0) { result.push_back(make_unique<Integer>(0)); pos++; }
+        }
+        // 找到对齐的边界, 确定此嵌套列表对应的维度
+        int target;
+        if (pos == 0 && dim_start + 1 < (int)dims.size()) {
+          target = dim_start + 1;
+        } else {
+          target = dim_start;
+          int stride = 1;
+          for (int d = (int)dims.size() - 1; d >= dim_start; d--) {
+            stride *= dims[d];
+            if (pos % stride == 0) target = d;
+          }
+        }
+        EvalInitToFlat(dims, target, *sub, block, reg_counter, result);
+      } else {
+        auto val = EvaluateExp(*sub->exp, block, reg_counter);
+        if (val) result.push_back(std::move(val));
+        else result.push_back(make_unique<Integer>(0));
+      }
+    }
+    while ((int)result.size() % total_in_sub != 0)
+      result.push_back(make_unique<Integer>(0));
+  } else {
+    auto val = EvaluateExp(*init.exp, block, reg_counter);
+    if (val) result.push_back(std::move(val));
+    else result.push_back(make_unique<Integer>(0));
+  }
+}
+
+// 为局部数组生成 getelemptr + store 初始化代码
+static void GenerateArrayInitCode(const vector<int> &dims,
+                                   const string &array_alloc,
+                                   vector<unique_ptr<Value>> &flat_vals,
+                                   BasicBlock *&block, int &reg_counter) {
+  for (size_t i = 0; i < flat_vals.size(); i++) {
+    auto multi = FlatToMultiIndex(dims, (int)i);
+    vector<unique_ptr<Value>> idx_vals;
+    for (int m : multi) idx_vals.push_back(make_unique<Integer>(m));
+    string ptr = GenerateArrayAccess(array_alloc, dims, false, idx_vals, block, reg_counter);
+    block->instructions.push_back(
+        make_unique<StoreInst>(std::move(flat_vals[i]), ptr));
   }
 }
 
@@ -485,36 +874,150 @@ static void ProcessVarDecl(const BaseAST &ast, BasicBlock *&block, int &reg_coun
   for (auto &def : var_decl->var_defs) {
     const auto *var_def = dynamic_cast<const VarDefAST*>(def.get());
     if (!var_def) continue;
-    AddVar(var_def->ident, block, reg_counter);
 
+    // 求值数组维度
+    vector<int> dims;
+    for (auto &d : var_def->dims) {
+      dims.push_back(EvaluateConstExp(*d));
+    }
+
+    // 添加变量到符号表 (带维度)
+    if (is_global) {
+      // 全局变量: 手动构造 SymbolInfo
+      string global_name = "@" + var_def->ident;
+      string koopa_type = dims.empty() ? "i32" : MakeArrayType(dims);
+      SymbolInfo info;
+      info.alloc_name = global_name;
+      info.is_global = true;
+      info.is_array = !dims.empty();
+      info.dims = dims;
+      info.is_array_param = false;  // 全局变量不是函数形参
+      auto &cur = scope_stack.back();
+      if (cur.count(var_def->ident)) { cerr << "error: duplicate symbol " << var_def->ident << endl; continue; }
+      cur[var_def->ident] = info;
+      // 关键: 必须生成 global alloc (默认 zeroinit, 初始化后替换)
+      current_program->global_allocs.push_back(
+          make_unique<GlobalAllocInst>(global_name, koopa_type, make_unique<ZeroInit>()));
+    } else {
+      AddVar(var_def->ident, dims, block, reg_counter);
+    }
+
+    // 处理初始化
     if (var_def->has_init) {
-      const auto *init_val = dynamic_cast<const InitValAST*>(var_def->init_val.get());
-      if (!init_val) continue;
       auto *info = Lookup(var_def->ident);
       if (!info) continue;
 
-      unique_ptr<Value> val;
-      if (is_global) {
-        // 全局变量初始值必须是常量
-        int const_init = EvaluateConstExp(*init_val->exp);
-        val = make_unique<Integer>(const_init);
-      } else {
-        val = EvaluateExp(*init_val->exp, block, reg_counter);
-      }
-
-      if (val && info) {
+      if (dims.empty()) {
+        // 标量变量初始化
+        const auto *init_val = dynamic_cast<const InitValAST*>(var_def->init_val.get());
+        if (!init_val || init_val->is_list) continue;
+        unique_ptr<Value> val;
         if (is_global) {
-          // 更新全局 alloc 的初始值 (替换默认的 zeroinit)
-          for (auto &ga : current_program->global_allocs) {
-            auto *g = dynamic_cast<GlobalAllocInst*>(ga.get());
-            if (g && g->name == info->alloc_name) {
-              g->init_val = std::move(val);
-              break;
+          int const_init = EvaluateConstExp(*init_val->exp);
+          val = make_unique<Integer>(const_init);
+        } else {
+          val = EvaluateExp(*init_val->exp, block, reg_counter);
+        }
+        if (val && info) {
+          if (is_global) {
+            for (auto &ga : current_program->global_allocs) {
+              auto *g = dynamic_cast<GlobalAllocInst*>(ga.get());
+              if (g && g->name == info->alloc_name) {
+                g->init_val = std::move(val);
+                break;
+              }
+            }
+          } else {
+            block->instructions.push_back(
+                make_unique<StoreInst>(std::move(val), info->alloc_name));
+          }
+        }
+      } else {
+        // 数组初始化
+        const auto *init_val = dynamic_cast<const InitValAST*>(var_def->init_val.get());
+        if (!init_val) continue;
+        if (is_global) {
+          // 全局数组: 展平为常量, 生成 Aggregate
+          vector<int> flat;
+          const auto *const_init = dynamic_cast<const ConstInitValAST*>(init_val);
+          // 对于全局数组, InitVal 中的表达式必须是常量
+          if (const_init) {
+            FlattenConstInit(dims, 0, *const_init, flat);
+          } else {
+            // 仍然是 InitVal, 但约束为常量表达式
+            // 手动展平: 所有元素调用 EvaluateConstExp
+            // 对于 InitVal, 递归展平
+            function<void(int, const InitValAST&)> flatten;
+            flatten = [&](int dim_start, const InitValAST &iv) {
+              int total = 1;
+              for (int i = dim_start; i < (int)dims.size(); i++) total *= dims[i];
+              if (iv.is_list) {
+                for (auto &item : iv.items) {
+                  auto *sub = dynamic_cast<InitValAST*>(item.get());
+                  if (!sub) continue;
+                  if (sub->is_list) {
+                    int pos = (int)flat.size();
+                    int inn = dims.back();
+                    if (pos % inn != 0) {
+                      while (pos % inn != 0) { flat.push_back(0); pos++; }
+                    }
+                    int tgt;
+                    if (pos == 0 && dim_start + 1 < (int)dims.size()) {
+                      tgt = dim_start + 1;
+                    } else {
+                      tgt = dim_start;
+                      int s = 1;
+                      for (int dd = (int)dims.size() - 1; dd >= dim_start; dd--) {
+                        s *= dims[dd];
+                        if (pos % s == 0) tgt = dd;
+                      }
+                    }
+                    flatten(tgt, *sub);
+                  } else {
+                    flat.push_back(EvaluateConstExp(*sub->exp));
+                  }
+                }
+                while ((int)flat.size() % total != 0) flat.push_back(0);
+              } else {
+                flat.push_back(EvaluateConstExp(*iv.exp));
+              }
+            };
+            flatten(0, *init_val);
+          }
+          int total = 1;
+          for (int d : dims) total *= d;
+          while ((int)flat.size() < total) flat.push_back(0);
+
+          if (dims.size() <= 1) {
+            vector<unique_ptr<Value>> elems;
+            for (int v : flat) elems.push_back(make_unique<Integer>(v));
+            for (auto &ga : current_program->global_allocs) {
+              auto *g = dynamic_cast<GlobalAllocInst*>(ga.get());
+              if (g && g->name == info->alloc_name) {
+                g->init_val = make_unique<Aggregate>(std::move(elems));
+                break;
+              }
+            }
+          } else {
+            size_t pos = 0;
+            auto nested = BuildNestedAggregate(dims, 0, flat, pos);
+            for (auto &ga : current_program->global_allocs) {
+              auto *g = dynamic_cast<GlobalAllocInst*>(ga.get());
+              if (g && g->name == info->alloc_name) {
+                g->init_val = std::move(nested);
+                break;
+              }
             }
           }
         } else {
-          block->instructions.push_back(
-              make_unique<StoreInst>(std::move(val), info->alloc_name));
+          // 局部数组: 展平为运行时值, 生成 getelemptr + store
+          vector<unique_ptr<Value>> flat_vals;
+          EvalInitToFlat(dims, 0, *init_val, block, reg_counter, flat_vals);
+          int total = 1;
+          for (int d : dims) total *= d;
+          while ((int)flat_vals.size() < (size_t)total)
+            flat_vals.push_back(make_unique<Integer>(0));
+          GenerateArrayInitCode(dims, info->alloc_name, flat_vals, block, reg_counter);
         }
       }
     }
@@ -531,8 +1034,26 @@ static void ProcessAssign(const BaseAST &ast, BasicBlock *&block, int &reg_count
   auto *info = Lookup(lval->ident);
   if (!info) { cerr << "error: undefined symbol " << lval->ident << endl; return; }
   if (info->is_const) { cerr << "error: cannot assign to constant " << lval->ident << endl; return; }
+
   auto val = EvaluateExp(*stmt->assign_exp, block, reg_counter);
-  if (val) block->instructions.push_back(make_unique<StoreInst>(std::move(val), info->alloc_name));
+  if (!val) return;
+
+  if (lval->indices.empty()) {
+    // 标量赋值
+    block->instructions.push_back(make_unique<StoreInst>(std::move(val), info->alloc_name));
+  } else {
+    // 数组元素赋值
+    vector<unique_ptr<Value>> idx_vals;
+    for (auto &idx : lval->indices) {
+      auto idx_val = EvaluateExp(*idx, block, reg_counter);
+      if (idx_val) idx_vals.push_back(std::move(idx_val));
+      else idx_vals.push_back(make_unique<Integer>(0));
+    }
+    string ptr = GenerateArrayAccess(info->alloc_name, info->dims,
+                                      info->is_array_param, idx_vals,
+                                      block, reg_counter);
+    block->instructions.push_back(make_unique<StoreInst>(std::move(val), ptr));
+  }
 }
 
 static BasicBlock *ProcessStmt(const StmtAST &stmt, BasicBlock *cur, int &reg_counter);
@@ -680,14 +1201,15 @@ static void AddLibraryFunctions(Program &program) {
   // 添加库函数到全局符号表 (在 GenerateIR 中 scope_stack[0] 已存在)
   auto &global = scope_stack[0];
 
-  global["getint"]    = {false, 0, "", true, "i32", 0, false};
-  global["getch"]     = {false, 0, "", true, "i32", 0, false};
-  global["getarray"]  = {false, 0, "", true, "i32", 1, false};
-  global["putint"]    = {false, 0, "", true, "void", 1, false};
-  global["putch"]     = {false, 0, "", true, "void", 1, false};
-  global["putarray"]  = {false, 0, "", true, "void", 2, false};
-  global["starttime"] = {false, 0, "", true, "void", 0, false};
-  global["stoptime"]  = {false, 0, "", true, "void", 0, false};
+  // 为库函数设置 SymbolInfo, 新增字段默认值
+  global["getint"]    = {false, 0, "", true, "i32", 0, false, false, {}, false, 0};
+  global["getch"]     = {false, 0, "", true, "i32", 0, false, false, {}, false, 0};
+  global["getarray"]  = {false, 0, "", true, "i32", 1, false, false, {}, false, 0};
+  global["putint"]    = {false, 0, "", true, "void", 1, false, false, {}, false, 0};
+  global["putch"]     = {false, 0, "", true, "void", 1, false, false, {}, false, 0};
+  global["putarray"]  = {false, 0, "", true, "void", 2, false, false, {}, false, 0};
+  global["starttime"] = {false, 0, "", true, "void", 0, false, false, {}, false, 0};
+  global["stoptime"]  = {false, 0, "", true, "void", 0, false, false, {}, false, 0};
 
   // 生成 Koopa IR 中的 decl 语句
   auto make_decl = [&](const string &name, const vector<string> &param_types, const string &ret) {
@@ -732,12 +1254,50 @@ static void ProcessFuncDef(const BaseAST &ast) {
 
   // 处理形参
   vector<string> param_names;
+  vector<string> param_refs;    // Koopa IR 中的参数引用名 (可能与 param_names 不同, 用于避免与全局变量冲突)
+  vector<string> param_koopa_types;
+  vector<bool> param_is_array;
+  vector<vector<int>> param_dims;
   if (func_def->has_params) {
     for (auto &p : func_def->params) {
       const auto *fparam = dynamic_cast<const FuncFParamAST*>(p.get());
       if (fparam) {
-        func->params.push_back({"@" + fparam->ident, "i32"});
-        param_names.push_back(fparam->ident);
+        // 检查参数名是否与全局变量冲突
+        string param_ref;
+        if (!scope_stack.empty()) {
+          auto &global = scope_stack[0];
+          if (global.count(fparam->ident)) {
+            // 冲突: 使用带前缀的参数名, 避免 Koopa IR 在函数体内将 @name 解析为全局变量
+            param_ref = "@_param_" + fparam->ident;
+          } else {
+            param_ref = "@" + fparam->ident;
+          }
+        } else {
+          param_ref = "@" + fparam->ident;
+        }
+
+        if (fparam->is_array) {
+          // 数组参数: 求值已知维度
+          vector<int> known_dims;
+          for (auto &d : fparam->dims) {
+            known_dims.push_back(EvaluateConstExp(*d));
+          }
+          string koopa_type = MakeFuncArrayParamType(known_dims);
+          func->params.push_back({param_ref, koopa_type});
+          param_names.push_back(fparam->ident);
+          param_refs.push_back(param_ref);
+          param_koopa_types.push_back(koopa_type);
+          param_is_array.push_back(true);
+          param_dims.push_back(known_dims);
+        } else {
+          // 标量参数
+          func->params.push_back({param_ref, "i32"});
+          param_names.push_back(fparam->ident);
+          param_refs.push_back(param_ref);
+          param_koopa_types.push_back("i32");
+          param_is_array.push_back(false);
+          param_dims.push_back({});
+        }
       }
     }
   }
@@ -753,14 +1313,27 @@ static void ProcessFuncDef(const BaseAST &ast) {
   EnterScope();
   for (size_t i = 0; i < param_names.size(); ++i) {
     const string &pname = param_names[i];
-    // 分配局部变量空间
     string alloc_name = "@" + pname + "_" + to_string(alloc_counter++);
+    string koopa_type = param_koopa_types[i];
     auto &cur = scope_stack.back();
-    cur[pname] = {false, 0, alloc_name, false, "", 0, false};
-    // alloc
-    entry_bb->instructions.push_back(make_unique<AllocInst>(alloc_name));
-    // store 形参到局部变量
-    string param_ref = "@" + pname;
+
+    SymbolInfo info;
+    info.is_const = false;
+    info.const_val = 0;
+    info.alloc_name = alloc_name;
+    info.is_func = false;
+    info.is_global = false;
+    info.is_array = param_is_array[i];
+    info.dims = param_dims[i];
+    info.is_array_param = param_is_array[i];
+    info.param_index = (int)i;
+    cur[pname] = info;
+
+    // alloc 形参空间
+    entry_bb->instructions.push_back(make_unique<AllocInst>(alloc_name, koopa_type));
+    // store 形参值到局部变量
+    // param_ref 已通过重命名避免与全局变量同名冲突
+    string param_ref = param_refs[i];
     entry_bb->instructions.push_back(
         make_unique<StoreInst>(make_unique<AllocRef>(param_ref), alloc_name));
   }

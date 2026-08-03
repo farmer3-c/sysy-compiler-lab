@@ -32,6 +32,11 @@ private:
     // 分配临时寄存器
     std::string AllocReg();
 
+    // 大栈帧辅助: 处理 offset > 2047 的 sp 相对访问
+    void EmitLoadSp(const std::string &dst, int offset);
+    void EmitStoreSp(const std::string &src, int offset);
+    void EmitSpAdd(const std::string &dst, int offset);
+
     // 共享状态
     std::ostream &os;
     int frame_size = 0;                  // 对齐后的栈帧大小

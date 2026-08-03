@@ -36,16 +36,26 @@ class CompUnitAST : public BaseAST {
 };
 
 // ==================== FuncFParam ====================
-// FuncFParam ::= BType IDENT
+// FuncFParam ::= BType IDENT ["[" "]" {"[" ConstExp "]"}]
 class FuncFParamAST : public BaseAST {
  public:
   std::unique_ptr<BaseAST> btype;
   std::string ident;
+  bool is_array;  // true: 数组参数 (第一维省略)
+  // 已知维度: 对于 int arr[][10][20], dims 包含 10, 20
+  // 对于 int arr[], dims 为空
+  // 对于 int arr[10], dims 包含 10 (但这种情况语法约束第一维必须空)
+  std::vector<std::unique_ptr<BaseAST>> dims;
 
   void Dump() const override {
     std::cout << "FuncFParamAST { ";
     btype->Dump();
-    std::cout << ", " << ident << " }";
+    std::cout << ", " << ident;
+    if (is_array) {
+      std::cout << "[]";
+      for (auto &d : dims) { std::cout << "["; d->Dump(); std::cout << "]"; }
+    }
+    std::cout << " }";
   }
 };
 
@@ -95,35 +105,58 @@ class BTypeAST : public BaseAST {
 };
 
 // ==================== LVal ====================
-// LVal ::= IDENT
+// LVal ::= IDENT {"[" Exp "]"}
 class LValAST : public BaseAST {
  public:
   std::string ident;
+  // 数组索引表达式列表 (为空表示标量)
+  std::vector<std::unique_ptr<BaseAST>> indices;
   void Dump() const override {
-    std::cout << "LValAST { " << ident << " }";
+    std::cout << "LValAST { " << ident;
+    for (auto &idx : indices) {
+      std::cout << "[";
+      idx->Dump();
+      std::cout << "]";
+    }
+    std::cout << " }";
   }
 };
 
 // ==================== ConstInitVal ====================
-// ConstInitVal ::= ConstExp
+// ConstInitVal ::= ConstExp | "{" [ConstInitVal {"," ConstInitVal}] "}"
 class ConstInitValAST : public BaseAST {
  public:
-  std::unique_ptr<BaseAST> exp;
+  bool is_list;  // true: items (列表); false: exp (标量)
+  std::unique_ptr<BaseAST> exp;  // scalar ConstExp
+  std::vector<std::unique_ptr<BaseAST>> items;  // list elements (ConstInitValAST)
   void Dump() const override {
     std::cout << "ConstInitValAST { ";
-    exp->Dump();
+    if (is_list) {
+      std::cout << "{";
+      for (size_t i = 0; i < items.size(); ++i) {
+        if (i > 0) std::cout << ", ";
+        items[i]->Dump();
+      }
+      std::cout << "}";
+    } else {
+      exp->Dump();
+    }
     std::cout << " }";
   }
 };
 
 // ==================== ConstDef ====================
-// ConstDef ::= IDENT "=" ConstInitVal
+// ConstDef ::= IDENT {"[" ConstExp "]"} "=" ConstInitVal
 class ConstDefAST : public BaseAST {
  public:
   std::string ident;
+  // 数组维度表达式列表 (ConstExp), 为空表示标量
+  std::vector<std::unique_ptr<BaseAST>> dims;
   std::unique_ptr<BaseAST> init_val;
   void Dump() const override {
-    std::cout << "ConstDefAST { " << ident << ", ";
+    std::cout << "ConstDefAST { " << ident;
+    for (auto &d : dims) { std::cout << "["; d->Dump(); std::cout << "]"; }
+    std::cout << ", ";
     init_val->Dump();
     std::cout << " }";
   }
@@ -147,26 +180,40 @@ class ConstDeclAST : public BaseAST {
 };
 
 // ==================== InitVal ====================
-// InitVal ::= Exp
+// InitVal ::= Exp | "{" [InitVal {"," InitVal}] "}"
 class InitValAST : public BaseAST {
  public:
-  std::unique_ptr<BaseAST> exp;
+  bool is_list;  // true: items (列表); false: exp (标量)
+  std::unique_ptr<BaseAST> exp;  // scalar Exp
+  std::vector<std::unique_ptr<BaseAST>> items;  // list elements (each is InitValAST)
   void Dump() const override {
     std::cout << "InitValAST { ";
-    exp->Dump();
+    if (is_list) {
+      std::cout << "{";
+      for (size_t i = 0; i < items.size(); ++i) {
+        if (i > 0) std::cout << ", ";
+        items[i]->Dump();
+      }
+      std::cout << "}";
+    } else {
+      exp->Dump();
+    }
     std::cout << " }";
   }
 };
 
 // ==================== VarDef ====================
-// VarDef ::= IDENT | IDENT "=" InitVal
+// VarDef ::= IDENT {"[" ConstExp "]"} ["=" InitVal]
 class VarDefAST : public BaseAST {
  public:
   std::string ident;
+  // 数组维度表达式列表 (ConstExp), 为空表示标量
+  std::vector<std::unique_ptr<BaseAST>> dims;
   bool has_init;
   std::unique_ptr<BaseAST> init_val;
   void Dump() const override {
     std::cout << "VarDefAST { " << ident;
+    for (auto &d : dims) { std::cout << "["; d->Dump(); std::cout << "]"; }
     if (has_init) {
       std::cout << ", ";
       init_val->Dump();
@@ -408,6 +455,8 @@ class PrimaryExpAST : public BaseAST {
   std::unique_ptr<BaseAST> exp;
   int number;
   std::string ident;
+  bool has_indices;  // true if LVal has array indices
+  std::vector<std::unique_ptr<BaseAST>> indices;  // array index expressions (Exp)
 
   void Dump() const override {
     std::cout << "PrimaryExpAST { ";
@@ -415,6 +464,13 @@ class PrimaryExpAST : public BaseAST {
       std::cout << number;
     } else if (is_lval) {
       std::cout << ident;
+      if (has_indices) {
+        for (auto &idx : indices) {
+          std::cout << "[";
+          idx->Dump();
+          std::cout << "]";
+        }
+      }
     } else {
       exp->Dump();
     }

@@ -40,6 +40,7 @@ using namespace std;
 %type <ast_val> BlockItemList ConstDefList VarDefList
 %type <ast_val> MatchedStmt OpenStmt
 %type <ast_val> FuncFParam FuncFParams FuncRParams
+%type <ast_val> ConstDefDims ConstInitValList InitValList LValIndices FuncFParamDims
 %type <str_val> UnaryOp
 %type <int_val> Number
 
@@ -126,13 +127,41 @@ FuncFParams
   }
   ;
 
-// FuncFParam ::= Type IDENT
+// FuncFParam ::= BType IDENT ["[" "]" {"[" ConstExp "]"}]
 FuncFParam
   : Type IDENT {
     auto param = new FuncFParamAST();
     param->btype = unique_ptr<BaseAST>($1);
     param->ident = *unique_ptr<string>($2);
+    param->is_array = false;
     $$ = param;
+  }
+  | Type IDENT '[' ']' FuncFParamDims {
+    auto param = new FuncFParamAST();
+    param->btype = unique_ptr<BaseAST>($1);
+    param->ident = *unique_ptr<string>($2);
+    param->is_array = true;
+    // FuncFParamDims 返回一个 ConstDefAST 作为维度容器
+    auto dim_container = dynamic_cast<ConstDefAST*>(const_cast<BaseAST*>($5));
+    if (dim_container) {
+      for (auto &d : dim_container->dims) param->dims.push_back(std::move(d));
+      delete dim_container;
+    }
+    $$ = param;
+  }
+  ;
+
+// FuncFParamDims: {"[" ConstExp "]"}
+FuncFParamDims
+  : /* empty */ {
+    auto ast = new ConstDefAST();
+    ast->init_val = nullptr;
+    $$ = ast;
+  }
+  | FuncFParamDims '[' ConstExp ']' {
+    auto ast = dynamic_cast<ConstDefAST*>(const_cast<BaseAST*>($1));
+    ast->dims.push_back(unique_ptr<BaseAST>($3));
+    $$ = ast;
   }
   ;
 
@@ -233,21 +262,73 @@ ConstDefList
   }
   ;
 
-// ConstDef ::= IDENT "=" ConstInitVal
+// ConstDef ::= IDENT {"[" ConstExp "]"} "=" ConstInitVal
 ConstDef
-  : IDENT '=' ConstInitVal {
+  : IDENT ConstDefDims '=' ConstInitVal {
     auto ast = new ConstDefAST();
     ast->ident = *unique_ptr<string>($1);
-    ast->init_val = unique_ptr<BaseAST>($3);
+    // 从 ConstDefDims 中提取维度
+    auto dim_list = dynamic_cast<ConstDefAST*>(const_cast<BaseAST*>($2));
+    if (dim_list) {
+      for (auto &d : dim_list->dims) ast->dims.push_back(std::move(d));
+      delete dim_list;
+    }
+    ast->init_val = unique_ptr<BaseAST>($4);
     $$ = ast;
   }
   ;
 
-// ConstInitVal ::= ConstExp
+// ConstDefDims: 辅助规则, 存储维度列表 {"[" ConstExp "]"}
+ConstDefDims
+  : /* empty */ {
+    // 返回一个空的 ConstDefAST 作为维度容器
+    auto ast = new ConstDefAST();
+    ast->init_val = nullptr;
+    $$ = ast;
+  }
+  | ConstDefDims '[' ConstExp ']' {
+    auto ast = dynamic_cast<ConstDefAST*>(const_cast<BaseAST*>($1));
+    ast->dims.push_back(unique_ptr<BaseAST>($3));
+    $$ = ast;
+  }
+  ;
+
+// ConstInitVal ::= ConstExp | "{" [ConstInitVal {"," ConstInitVal}] "}"
 ConstInitVal
   : ConstExp {
     auto ast = new ConstInitValAST();
+    ast->is_list = false;
     ast->exp = unique_ptr<BaseAST>($1);
+    $$ = ast;
+  }
+  | '{' '}' {
+    auto ast = new ConstInitValAST();
+    ast->is_list = true;
+    $$ = ast;  // 空列表
+  }
+  | '{' ConstInitValList '}' {
+    auto ast = new ConstInitValAST();
+    ast->is_list = true;
+    auto list = dynamic_cast<ConstInitValAST*>(const_cast<BaseAST*>($2));
+    if (list) {
+      for (auto &item : list->items) ast->items.push_back(std::move(item));
+      delete list;
+    }
+    $$ = ast;
+  }
+  ;
+
+// ConstInitValList ::= ConstInitVal {"," ConstInitVal}
+ConstInitValList
+  : ConstInitVal {
+    auto ast = new ConstInitValAST();
+    ast->is_list = true;
+    ast->items.push_back(unique_ptr<BaseAST>($1));
+    $$ = ast;
+  }
+  | ConstInitValList ',' ConstInitVal {
+    auto ast = dynamic_cast<ConstInitValAST*>(const_cast<BaseAST*>($1));
+    ast->items.push_back(unique_ptr<BaseAST>($3));
     $$ = ast;
   }
   ;
@@ -288,37 +369,98 @@ VarDefList
   }
   ;
 
-// VarDef ::= IDENT | IDENT "=" InitVal
+// VarDef ::= IDENT {"[" ConstExp "]"} ["=" InitVal]
 VarDef
-  : IDENT {
+  : IDENT ConstDefDims {
     auto ast = new VarDefAST();
     ast->ident = *unique_ptr<string>($1);
+    auto dim_list = dynamic_cast<ConstDefAST*>(const_cast<BaseAST*>($2));
+    if (dim_list) {
+      for (auto &d : dim_list->dims) ast->dims.push_back(std::move(d));
+      delete dim_list;
+    }
     ast->has_init = false;
     $$ = ast;
   }
-  | IDENT '=' InitVal {
+  | IDENT ConstDefDims '=' InitVal {
     auto ast = new VarDefAST();
     ast->ident = *unique_ptr<string>($1);
+    auto dim_list = dynamic_cast<ConstDefAST*>(const_cast<BaseAST*>($2));
+    if (dim_list) {
+      for (auto &d : dim_list->dims) ast->dims.push_back(std::move(d));
+      delete dim_list;
+    }
     ast->has_init = true;
-    ast->init_val = unique_ptr<BaseAST>($3);
+    ast->init_val = unique_ptr<BaseAST>($4);
     $$ = ast;
   }
   ;
 
-// InitVal ::= Exp
+// InitVal ::= Exp | "{" [InitVal {"," InitVal}] "}"
 InitVal
   : Exp {
     auto ast = new InitValAST();
+    ast->is_list = false;
     ast->exp = unique_ptr<BaseAST>($1);
+    $$ = ast;
+  }
+  | '{' '}' {
+    auto ast = new InitValAST();
+    ast->is_list = true;
+    $$ = ast;  // 空列表
+  }
+  | '{' InitValList '}' {
+    auto ast = new InitValAST();
+    ast->is_list = true;
+    auto list = dynamic_cast<InitValAST*>(const_cast<BaseAST*>($2));
+    if (list) {
+      for (auto &item : list->items) ast->items.push_back(std::move(item));
+      delete list;
+    }
+    $$ = ast;
+  }
+  ;
+
+// InitValList ::= InitVal {"," InitVal}
+InitValList
+  : InitVal {
+    auto ast = new InitValAST();
+    ast->is_list = true;
+    ast->items.push_back(unique_ptr<BaseAST>($1));
+    $$ = ast;
+  }
+  | InitValList ',' InitVal {
+    auto ast = dynamic_cast<InitValAST*>(const_cast<BaseAST*>($1));
+    ast->items.push_back(unique_ptr<BaseAST>($3));
     $$ = ast;
   }
   ;
 
 // ==================== LVal ====================
+// LVal ::= IDENT {"[" Exp "]"}
 LVal
-  : IDENT {
+  : IDENT LValIndices {
     auto ast = new LValAST();
     ast->ident = *unique_ptr<string>($1);
+    auto idx_holder = dynamic_cast<LValAST*>(const_cast<BaseAST*>($2));
+    if (idx_holder) {
+      for (auto &idx : idx_holder->indices) ast->indices.push_back(std::move(idx));
+      delete idx_holder;
+    }
+    $$ = ast;
+  }
+  ;
+
+// LValIndices: 辅助规则, 存储索引列表 {"[" Exp "]"}
+LValIndices
+  : /* empty */ {
+    auto ast = new LValAST();
+    ast->ident = "";
+    $$ = ast;
+  }
+  | LValIndices '[' Exp ']' {
+    auto ast = dynamic_cast<LValAST*>(const_cast<BaseAST*>($1));
+    ast->indices.push_back(unique_ptr<BaseAST>($3));
     $$ = ast;
   }
   ;
@@ -657,14 +799,21 @@ PrimaryExp
     auto ast = new PrimaryExpAST();
     ast->is_number = false;
     ast->is_lval = false;
+    ast->has_indices = false;
     ast->exp = unique_ptr<BaseAST>($2);
     $$ = ast;
   }
   | LVal {
+    auto *lval_ast = dynamic_cast<LValAST*>($1);
     auto ast = new PrimaryExpAST();
     ast->is_number = false;
     ast->is_lval = true;
-    ast->ident = dynamic_cast<LValAST*>($1)->ident;
+    ast->ident = lval_ast->ident;
+    ast->has_indices = !lval_ast->indices.empty();
+    if (ast->has_indices) {
+      for (auto &idx : lval_ast->indices)
+        ast->indices.push_back(std::move(idx));
+    }
     delete $1;
     $$ = ast;
   }
@@ -672,6 +821,7 @@ PrimaryExp
     auto ast = new PrimaryExpAST();
     ast->is_number = true;
     ast->is_lval = false;
+    ast->has_indices = false;
     ast->number = $1;
     $$ = ast;
   }
