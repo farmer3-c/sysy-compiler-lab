@@ -583,36 +583,36 @@ void ASMGenerator::Visit(const koopa_raw_value_t &value) {
         auto &call = value->kind.data.call;
         int num_args = (int)call.args.len;
         int extra_args = num_args > 8 ? num_args - 8 : 0;
+        int extra_size = extra_args * 4;
 
-        // 1. 前 8 个参数: 加载后立即 mv 到 a0-a7 (sp 未被修改, 偏移正确)
+        // 1. 超过 8 个的参数: 在 sp 尚未调整时即取即存到负偏移位置
+        //    (稍后 addi sp, sp, -extra_size 后, 这些位置正好落在
+        //     0..extra_size-4 的调用栈槽上)。这样 GetOperand 计算栈偏移时
+        //    sp 未被修改 (偏移正确), 又避免把所有额外参数缓存进寄存器
+        //    导致 AllocReg() 循环分配 (t0-t6) 互相覆盖。
+        for (int i = 8; i < num_args; ++i) {
+            auto arg = reinterpret_cast<koopa_raw_value_t>(call.args.buffer[i]);
+            std::string arg_reg = GetOperand(arg);
+            EmitStoreSp(arg_reg, (i - 8) * 4 - extra_size);
+        }
+
+        // 2. 前 8 个参数: 加载后立即 mv 到 a0-a7 (sp 未被修改, 偏移正确)
         for (int i = 0; i < num_args && i < 8; ++i) {
             auto arg = reinterpret_cast<koopa_raw_value_t>(call.args.buffer[i]);
             std::string arg_reg = GetOperand(arg);
             os << "  mv a" << i << ", " << arg_reg << "\n";
         }
 
-        // 2. 超过 8 个的参数: 先加载值 (sp 未被修改), 再调整 sp, 再存入栈
-        std::vector<std::string> extra_regs;
-        for (int i = 8; i < num_args; ++i) {
-            auto arg = reinterpret_cast<koopa_raw_value_t>(call.args.buffer[i]);
-            extra_regs.push_back(GetOperand(arg));
-        }
-        if (extra_args > 0) {
-            os << "  addi sp, sp, -" << (extra_args * 4) << "\n";
-            for (int i = 0; i < extra_args; ++i) {
-                os << "  sw " << extra_regs[i] << ", " << (i * 4) << "(sp)\n";
-            }
-        }
-
-        // 3. 调用
+        // 3. 预留调用栈空间并调用
+        if (extra_args > 0)
+            os << "  addi sp, sp, -" << extra_size << "\n";
         std::string func_name = call.callee->name;
         if (!func_name.empty() && func_name[0] == '@') func_name = func_name.substr(1);
         os << "  call " << func_name << "\n";
 
         // 4. 恢复 sp
-        if (extra_args > 0) {
-            os << "  addi sp, sp, " << (extra_args * 4) << "\n";
-        }
+        if (extra_args > 0)
+            os << "  addi sp, sp, " << extra_size << "\n";
 
         // 保存返回值 (如果有)
         if (HasReturnValue(value)) {

@@ -1,102 +1,36 @@
-root@35ab02276a4c:~# autotest -koopa -s lv9 /root
-run test in "-koopa" mode
-working directory: /tmp/tmprikcarot
+root@64c69cd37f9c:~# autotest -riscv -s lv8 /root
+run test in "-riscv" mode
+working directory: /tmp/tmpz1erq66a
 make: Entering directory '/root'
-mkdir -p /tmp/tmprikcarot/
-flex  -o /tmp/tmprikcarot/sysy.lex.cpp /root/src/sysy.l
-mkdir -p /tmp/tmprikcarot/
-bison -d -o /tmp/tmprikcarot/sysy.tab.cpp /root/src/sysy.y
-mkdir -p /tmp/tmprikcarot/
-clang++ -I/root/src -I/tmp/tmprikcarot -MMD -MP -Wall -Wno-register -std=c++17 -O2 -I/opt/include -c /tmp/tmprikcarot/sysy.lex.cpp -o /tmp/tmprikcarot/sysy.lex.cpp.o
-mkdir -p /tmp/tmprikcarot/
-clang++ -I/root/src -I/tmp/tmprikcarot -MMD -MP -Wall -Wno-register -std=c++17 -O2 -I/opt/include -c /tmp/tmprikcarot/sysy.tab.cpp -o /tmp/tmprikcarot/sysy.tab.cpp.o
-mkdir -p /tmp/tmprikcarot/
-clang++ -I/root/src -I/tmp/tmprikcarot -MMD -MP -Wall -Wno-register -std=c++17 -O2 -I/opt/include -c /root/src/ASMGenerator.cpp -o /tmp/tmprikcarot/ASMGenerator.cpp.o
-mkdir -p /tmp/tmprikcarot/
-clang++ -I/root/src -I/tmp/tmprikcarot -MMD -MP -Wall -Wno-register -std=c++17 -O2 -I/opt/include -c /root/src/IRGenerator.cpp -o /tmp/tmprikcarot/IRGenerator.cpp.o
-mkdir -p /tmp/tmprikcarot/
-clang++ -I/root/src -I/tmp/tmprikcarot -MMD -MP -Wall -Wno-register -std=c++17 -O2 -I/opt/include -c /root/src/main.cpp -o /tmp/tmprikcarot/main.cpp.o
-clang++ /tmp/tmprikcarot/sysy.lex.cpp.o /tmp/tmprikcarot/sysy.tab.cpp.o /tmp/tmprikcarot/ASMGenerator.cpp.o /tmp/tmprikcarot/IRGenerator.cpp.o /tmp/tmprikcarot/main.cpp.o -L/opt/lib/native -lkoopa -lpthread -ldl -o /tmp/tmprikcarot/compiler
+mkdir -p /tmp/tmpz1erq66a/
+flex  -o /tmp/tmpz1erq66a/sysy.lex.cpp /root/src/sysy.l
+mkdir -p /tmp/tmpz1erq66a/
+bison -d -o /tmp/tmpz1erq66a/sysy.tab.cpp /root/src/sysy.y
+mkdir -p /tmp/tmpz1erq66a/
+clang++ -I/root/src -I/tmp/tmpz1erq66a -MMD -MP -Wall -Wno-register -std=c++17 -O2 -I/opt/include -c /tmp/tmpz1erq66a/sysy.lex.cpp -o /tmp/tmpz1erq66a/sysy.lex.cpp.o
+mkdir -p /tmp/tmpz1erq66a/
+clang++ -I/root/src -I/tmp/tmpz1erq66a -MMD -MP -Wall -Wno-register -std=c++17 -O2 -I/opt/include -c /tmp/tmpz1erq66a/sysy.tab.cpp -o /tmp/tmpz1erq66a/sysy.tab.cpp.o
+mkdir -p /tmp/tmpz1erq66a/
+clang++ -I/root/src -I/tmp/tmpz1erq66a -MMD -MP -Wall -Wno-register -std=c++17 -O2 -I/opt/include -c /root/src/ASMGenerator.cpp -o /tmp/tmpz1erq66a/ASMGenerator.cpp.o
+mkdir -p /tmp/tmpz1erq66a/
+clang++ -I/root/src -I/tmp/tmpz1erq66a -MMD -MP -Wall -Wno-register -std=c++17 -O2 -I/opt/include -c /root/src/IRGenerator.cpp -o /tmp/tmpz1erq66a/IRGenerator.cpp.o
+mkdir -p /tmp/tmpz1erq66a/
+clang++ -I/root/src -I/tmp/tmpz1erq66a -MMD -MP -Wall -Wno-register -std=c++17 -O2 -I/opt/include -c /root/src/main.cpp -o /tmp/tmpz1erq66a/main.cpp.o
+clang++ /tmp/tmpz1erq66a/sysy.lex.cpp.o /tmp/tmpz1erq66a/sysy.tab.cpp.o /tmp/tmpz1erq66a/ASMGenerator.cpp.o /tmp/tmpz1erq66a/IRGenerator.cpp.o /tmp/tmpz1erq66a/main.cpp.o -L/opt/lib/native -lkoopa -lpthread -ldl -o /tmp/tmpz1erq66a/compiler
 make: Leaving directory '/root'
-running test "00_local_arr_1d" ... PASSED
-running test "01_local_arr_nd" ... PASSED
-running test "02_global_arr" ... PASSED
-running test "03_arr_init_1d" ... PASSED
-running test "04_arr_init_nd" ... PASSED
-running test "05_global_arr_init" ... PASSED
-running test "06_long_array" ... PASSED
-running test "07_const_array" ... PASSED
-running test "08_arr_access" ... PASSED
-running test "09_const_arr_read" ... PASSED
-running test "10_arr_in_loop" ... PASSED
-running test "11_arr_params" ... PASSED
-running test "12_more_arr_params" ... PASSED
-running test "13_complex_arr_params" ... PASSED
-running test "14_arr_lib_funcs" ... PASSED
-running test "15_sort1" ... PASSED
-running test "16_sort2" ... PASSED
-running test "17_sort3" ... PASSED
-running test "18_sort4" ... CASE ASSEMBLE ERROR
-stdout:
-
-stderr:
-error: invalid symbol '@'
-  at /tmp/tmprikcarot/76619fa0edfe4b93ab5ee4942b99a08f.S:10:28
-   |
-10 | fun @select_sort(@A: *i32, @.p_n: i32): i32 {
-   |                            ^
-
-error: invalid symbol '@'
-  at /tmp/tmprikcarot/76619fa0edfe4b93ab5ee4942b99a08f.S:15:9
-   |
-15 |   store @.p_n, @n_1
-   |         ^
-
-error: function '@select_sort' not found
-  at /tmp/tmprikcarot/76619fa0edfe4b93ab5ee4942b99a08f.S:121:9
-    |
-121 |   %12 = call @select_sort(%10, %11)
-    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-error: symbol '%12' not found
-  at /tmp/tmprikcarot/76619fa0edfe4b93ab5ee4942b99a08f.S:122:9
-    |
-122 |   store %12, @i_7
-    |         ^^^
-
-4 errors emitted
-
-running test "19_sort5" ... PASSED
-running test "20_sort6" ... CASE ASSEMBLE ERROR
-stdout:
-
-stderr:
-error: invalid symbol '@'
-  at /tmp/tmprikcarot/76619fa0edfe4b93ab5ee4942b99a08f.S:10:55
-   |
-10 | fun @counting_sort(@ini_arr: *i32, @sorted_arr: *i32, @.p_n: i32): i32 {
-   |                                                       ^
-
-error: invalid symbol '@'
-  at /tmp/tmprikcarot/76619fa0edfe4b93ab5ee4942b99a08f.S:17:9
-   |
-17 |   store @.p_n, @n_2
-   |         ^
-
-error: function '@counting_sort' not found
-  at /tmp/tmprikcarot/76619fa0edfe4b93ab5ee4942b99a08f.S:162:9
-    |
-162 |   %13 = call @counting_sort(%10, %11, %12)
-    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-error: symbol '%13' not found
-  at /tmp/tmprikcarot/76619fa0edfe4b93ab5ee4942b99a08f.S:163:9
-    |
-163 |   store %13, @i_8
-    |         ^^^
-
-4 errors emitted
-
-running test "21_sort7" ... PASSED
-WRONG ANSWER (20/22)
-root@35ab02276a4c:~#
+running test "00_int_func" ... PASSED
+running test "01_void_func" ... PASSED
+running test "02_params" ... PASSED
+running test "03_more_params" ... WRONG ANSWER
+your answer:
+179
+running test "04_param_name" ... PASSED
+running test "05_func_name" ... PASSED
+running test "06_complex_call" ... PASSED
+running test "07_recursion" ... PASSED
+running test "08_lib_funcs" ... PASSED
+running test "09_globals" ... PASSED
+running test "10_complex" ... PASSED
+running test "11_short_circuit" ... PASSED
+WRONG ANSWER (11/12)
+root@64c69cd37f9c:~#
