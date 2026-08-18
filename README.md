@@ -2,11 +2,57 @@
 
 基于[北大编译实践课程](https://pku-minic.github.io)的 SysY 语言编译器，将 SysY 程序编译为 RISC-V 汇编。
 
+## 构建
+
+### 依赖
+
+| 工具/库 | 说明 |
+|---------|------|
+| `clang` / `clang++` | 编译器（C11 / C++17） |
+| `flex` | 词法分析器生成器 |
+| `bison` | 语法分析器生成器 |
+| `libkoopa` | Koopa IR 运行时库（C API） |
+| `make` | 构建工具 |
+
+### 环境变量
+
+- `CDE_INCLUDE_PATH`：libkoopa 头文件所在目录（`koopa.h`）
+- `CDE_LIBRARY_PATH`：libkoopa 库文件所在目录（`libkoopa.*`），Makefile 会链接其中的 `native/libkoopa`
+
+> 推荐使用课程提供的 Docker 镜像 `maxxing/compiler-dev`，已预装全部依赖。
+
+### 编译
+
+```bash
+# 调试构建（默认）
+make
+
+# 优化构建
+make DEBUG=0
+
+# 清理
+make clean
+```
+
+生成的可执行文件为 `build/compiler`。
+
+### 用法
+
+```bash
+# 生成 Koopa IR 文本
+build/compiler -koopa input.sy output.koopa
+
+# 生成 RISC-V 汇编
+build/compiler -riscv input.sy output.s
+```
+
 ## 项目结构
 
 ```
 ├── Makefile              # 编译脚本
 ├── README.md
+├── LICENSE               # MIT 许可证
+├── .gitignore
 └── src/
     ├── main.cpp          # 入口, 驱动编译流水线
     ├── sysy.l            # Flex 词法规则 → 词法分析器
@@ -60,3 +106,7 @@ SysY 源码 (.sy)
 │    输出可被 RISC-V 汇编器/模拟器执行的 .s 文件                │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+## 许可证
+
+[MIT](LICENSE) © [farmer3-c](https://github.com/farmer3-c)

@@ -2,3 +2,10 @@
 /build/
 /debug/
 *.bash_history
+
+# 生成的 Koopa IR 与 RISC-V 汇编 (测试产物)
+*.koopa
+*.s
+
+# 调试日志
+wronglog

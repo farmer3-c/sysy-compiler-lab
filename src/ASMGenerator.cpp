@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2026 farmer3-c
 #include "ASMGenerator.h"
 #include <vector>
 
